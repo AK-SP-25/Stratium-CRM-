@@ -20,6 +20,10 @@ You need two accounts: **Supabase** (your private database + login) and
    Paste in the contents of `sql/schema.sql` from this project and click
    **Run**. This creates the one table the CRM uses and locks it down so
    only your logged-in account can ever read or write your rows.
+3a. Run a second query the same way with `sql/storage_setup.sql` -- this
+   creates a private file storage bucket for candidate CVs (original +
+   formatted), locked to your account the same way. Free tier includes
+   500MB-1GB of file storage, more than enough for CVs.
 4. Go to **Authentication -> Users** (left sidebar) -> **Add user** ->
    **Create new user**. Enter the email and password you want to log in
    with. Leave "Auto Confirm User" checked. This is the *only* account that

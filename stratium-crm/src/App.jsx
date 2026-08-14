@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { storage } from "./storage";
+import { fileStorage } from "./fileStorage";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
 import mammoth from "mammoth";
 import logo from "./assets/stratium-monogram.png";
 
-const K={co:'bd_crm_v2',cl:'st_clients_v1',ca:'st_candidates_v1',fl:'st_floats_v1',ac:'st_activity_v1',tg:'st_bd_targets_v1',dt:'st_date_override_v1'};
+const K={co:'bd_crm_v2',cl:'st_clients_v1',ca:'st_candidates_v1',fl:'st_floats_v1',ac:'st_activity_v1',tg:'st_bd_targets_v1',dt:'st_date_override_v1',rl:'st_roles_v1'};
 const P={bg:'#111318',wh:'#1C1C24',bo:'rgba(196,133,122,0.15)',ac:'#C4857A',tx:'#F5F0EB',ts:'#C8C0B8',tm:'#A09888',gn:'#10B981',bl:'#3B82F6',am:'#F59E0B',rd:'#EF4444',pu:'#8B5CF6',or:'#F97316',gy:'#94A3B8',vi:'#6366F1'};
 const PANEL='#15171C';const INBG='#0F0F0F';const FAINT='#5A5248';const TRACK='rgba(255,255,255,0.08)';
 const SERIF="'Cormorant Garamond',Georgia,serif";
@@ -23,9 +24,12 @@ const CONS=['AK','Tehniyat'];
 const CURR=['AED','USD','GBP','EUR','SAR'];
 const RS=['Briefed','Shortlisting','CVs Submitted','Interviewing','Offer Stage','Placed','On Hold','Lost','Cancelled'];
 const RC={'Briefed':P.gy,'Shortlisting':P.bl,'CVs Submitted':P.pu,'Interviewing':P.am,'Offer Stage':P.or,'Placed':P.gn,'On Hold':P.tm,'Lost':P.rd,'Cancelled':P.tm};
+// Per-candidate submission stages within a Role — distinct from role-level status above.
+const SUBS=['Submitted','Pending Feedback','Interview 1','Interview 2','Interview 3','Negotiating Offer','Offer Signed','Expected Start Date','Placed/Started','Rejected'];
+const SUBC={'Submitted':P.bl,'Pending Feedback':P.gy,'Interview 1':P.am,'Interview 2':P.am,'Interview 3':P.am,'Negotiating Offer':P.or,'Offer Signed':P.pu,'Expected Start Date':P.vi,'Placed/Started':P.gn,'Rejected':P.rd};
 const INS=['Draft','Sent','Paid','Overdue','Pending Clearance','Cleared','Written Off','Waived'];
 const IC={'Draft':P.tm,'Sent':P.bl,'Paid':P.gn,'Overdue':P.rd,'Pending Clearance':P.or,'Cleared':P.gn,'Written Off':P.rd,'Waived':P.gy};
-const NAV=[{id:'dash',l:'Dashboard',e:'⊞'},{id:'contacts',l:'Pipeline',e:'⊕'},{id:'cands',l:'Candidates',e:'◎'},{id:'floats',l:'Floats',e:'◉'},{id:'activity',l:'BD Activity',e:'◈'},{id:'meets',l:'Meetings',e:'◆'},{id:'clients',l:'Clients',e:'⊗'}];
+const NAV=[{id:'dash',l:'Dashboard',e:'⊞'},{id:'contacts',l:'Pipeline',e:'⊕'},{id:'cands',l:'Candidates',e:'◎'},{id:'roles',l:'Roles',e:'▣'},{id:'floats',l:'Floats',e:'◉'},{id:'activity',l:'BD Activity',e:'◈'},{id:'meets',l:'Meetings',e:'◆'},{id:'clients',l:'Clients',e:'⊗'}];
 const STAGE_ORDER={Cold:0,Contacted:1,Warm:2,'Proposal Sent':3,Negotiating:4,'Closed Won':5,'Closed Lost':6,'On Hold':7};
 const FLOAT_TO_STAGE={'Interested':'Warm','Interview Scheduled':'Proposal Sent'};
 
@@ -69,10 +73,14 @@ const migC=c=>{
 const newCo=()=>({id:gid(),name:'',title:'',company:'',industry:'',phone:'',phone2:'',email:'',stage:'Cold',lastContact:'',nextFollowUp:'',notes:'',nextSteps:'',callLog:[],createdAt:new Date().toISOString()});
 const newCa=()=>({id:gid(),name:'',currentRole:'',currentCompany:'',availability:'Immediate',salaryExpectation:'',currentSalary:'',currency:'AED',nationality:'',status:'Active',notes:'',consultant:'AK',createdAt:new Date().toISOString(),
   // CV Profile fields
-  positionApplied:'',cvSummary:'',cvBody:''});
+  positionApplied:'',cvSummary:'',cvBody:'',
+  // CV Files — Supabase Storage paths, not the binary itself. originalCv is
+  // {name,path,uploadedAt}|null; formattedCvs is a list of the same shape.
+  originalCv:null,formattedCvs:[]});
 const newFl=()=>({id:gid(),candidateId:'',candidateName:'',companyName:'',contactName:'',dateSent:realTod(),responseStatus:'No Response',notes:'',consultant:'AK'});
-const newCl=()=>({id:gid(),company:'',address:'',contactName:'',contactEmail:'',contactTitle:'',feeFirst:'',feeSubsequent:'',paymentTerms:'30 Days',contractDate:'',contractLink:'',roles:[],invoices:[],notes:'',createdAt:new Date().toISOString()});
-const newRo=()=>({id:gid(),title:'',status:'Briefed',cvsSubmitted:0,notes:'',consultant:'',contactPerson:'',candidateName:'',salary:'',currency:'AED',placementFee:''});
+const newCl=()=>({id:gid(),company:'',address:'',contactName:'',contactEmail:'',contactTitle:'',feeFirst:'',feeSubsequent:'',paymentTerms:'30 Days',contractDate:'',contractLink:'',invoices:[],notes:'',createdAt:new Date().toISOString()});
+const newRole=()=>({id:gid(),clientId:'',title:'',status:'Briefed',salary:'',currency:'AED',placementFee:'',consultant:'AK',contactPerson:'',dateOpened:realTod(),notes:'',submissions:[],createdAt:new Date().toISOString()});
+const newSub=()=>({id:gid(),candidateId:'',candidateName:'',status:'Submitted',dateSubmitted:realTod(),feedback:'',expectedStartDate:''});
 const newIn=()=>({id:gid(),invoiceNumber:'',roleTitle:'',candidateName:'',amount:'',currency:'AED',dateIssued:'',dateDue:'',datePaid:'',status:'Draft',link:'',items:[]});
 const newInvItem=()=>({id:gid(),desc:'',amount:''});
 
@@ -244,7 +252,7 @@ function parseCvBody(text){
 // summary bullets), then white body pages with a repeated small header and
 // black/mauve section bars for whatever the pasted CV body contains.
 // confidential=true blanks the candidate name on the cover and every page header.
-async function downloadCandidateProfilePDF(candidate, confidential){
+async function buildCandidateProfileDoc(candidate, confidential){
   const doc=new jsPDF({unit:'pt',format:'a4'});
   const ac=[196,133,122];
   const coverBg=[17,19,24];
@@ -346,7 +354,16 @@ async function downloadCandidateProfilePDF(candidate, confidential){
     y+=6;
   });
 
-  doc.save(`${confidential?'Confidential_':''}Profile_${(candidate.name||'candidate').replace(/[^\w-]/g,'_')}.pdf`);
+  return doc;
+}
+
+function candidateProfileFilename(candidate,confidential){
+  return `${confidential?'Confidential_':''}Profile_${(candidate.name||'candidate').replace(/[^\w-]/g,'_')}.pdf`;
+}
+
+async function downloadCandidateProfilePDF(candidate,confidential){
+  const doc=await buildCandidateProfileDoc(candidate,confidential);
+  doc.save(candidateProfileFilename(candidate,confidential));
 }
 
 const newAc=()=>({id:gid(),date:realTod(),type:'Call',contact:'',company:'',outcome:'',nextSteps:'',consultant:'AK'});
@@ -439,6 +456,7 @@ export default function App(){
   const[cands,setCands]=useState([]);
   const[floats,setFloats]=useState([]);
   const[activity,setActivity]=useState([]);
+  const[roles,setRoles]=useState([]);
   const[targets,setTargets]=useState({calls:20,floats:10,meetings:5,leads:5,revenue:50000});
   const[dateOverride,setDateOverride]=useState('');
   const[loaded,setLoaded]=useState(false);
@@ -449,6 +467,9 @@ export default function App(){
   const[caM,setCaM]=useState(null);const[caF,setCaF]=useState(newCa());
   const[flM,setFlM]=useState(null);const[flF,setFlF]=useState(newFl());
   const[clM,setClM]=useState(null);const[clF,setClF]=useState(newCl());
+  const[roleM,setRoleM]=useState(null);const[roleF,setRoleF]=useState(newRole());
+  const[roleClientFilter,setRoleClientFilter]=useState(null);
+  const[roleStatusFilter,setRoleStatusFilter]=useState('Live');
   const[acM,setAcM]=useState(false);const[acF,setAcF]=useState(newAc());
   const[lgM,setLgM]=useState(null);
   const[lgF,setLgF]=useState({date:realTod(),stage:'Cold',nextSteps:'',notes:'',consultant:'AK',nextFollowUp:''});
@@ -486,11 +507,28 @@ export default function App(){
     const loadedFloats=(await load(K.fl)).map(f=>({...f,dateSent:normD(f.dateSent)}));
     const loadedActivity=(await load(K.ac)).map(a=>({...a,date:normD(a.date)}));
     setContacts(loadedContacts);
-    setClients((await load(K.cl)).map(c=>({invoices:[],roles:[],...c})));
-    setCands(await load(K.ca));setFloats(loadedFloats);setActivity(loadedActivity);
+    let loadedClients=(await load(K.cl)).map(c=>({invoices:[],...c}));
+    let loadedRoles=await load(K.rl);
+    // One-time migration: older data kept roles nested inside each client.
+    // Pull any of those into the standalone Roles list (tagged with clientId),
+    // then strip them off the client — Clients only holds contract + invoices now.
+    const clientsWithLegacyRoles=loadedClients.filter(c=>Array.isArray(c.roles)&&c.roles.length);
+    if(clientsWithLegacyRoles.length){
+      const migrated=clientsWithLegacyRoles.flatMap(c=>c.roles.map(r=>({
+        ...newRole(),...r,clientId:c.id,
+        submissions:r.candidateName?[{...newSub(),candidateName:r.candidateName,status:r.status==='Placed'?'Placed/Started':'Submitted'}]:[]
+      })));
+      loadedRoles=[...loadedRoles,...migrated];
+      loadedClients=loadedClients.map(c=>{const{roles,...rest}=c;return rest;});
+      toast$(`✓ Migrated ${migrated.length} role${migrated.length!==1?'s':''} from Clients into the new Roles tab`);
+    }
+    setClients(loadedClients);setRoles(loadedRoles);
+    setCands((await load(K.ca)).map(c=>({originalCv:null,formattedCvs:[],...c})));
+    setFloats(loadedFloats);setActivity(loadedActivity);
     // Self-heal: if anything needed re-padding, write the corrected version straight back
     // so the fix persists and "This Month" etc. are correct from the very next load too.
     persist(K.co,loadedContacts);persist(K.fl,loadedFloats);persist(K.ac,loadedActivity);
+    if(clientsWithLegacyRoles.length){persist(K.cl,loadedClients);persist(K.rl,loadedRoles);}
     const tg=await load(K.tg,{calls:20,floats:10,meetings:5,leads:5,revenue:50000});setTargets({revenue:50000,...tg});setTgEdit({revenue:50000,...tg});
     const dt=await load(K.dt,'');setDateOverride(typeof dt==='string'?dt:'');
     setLoaded(true);
@@ -503,7 +541,7 @@ export default function App(){
   const saveCo=d=>{setContacts(d);persist(K.co,d);};const saveCl=d=>{setClients(d);persist(K.cl,d);};
   const saveCa=d=>{setCands(d);persist(K.ca,d);};const saveFl=d=>{setFloats(d);persist(K.fl,d);};
   const saveAc=d=>{setActivity(d);persist(K.ac,d);};const saveTg=d=>{setTargets(d);persist(K.tg,d);};
-  const saveDt=d=>{setDateOverride(d);persist(K.dt,d);};
+  const saveDt=d=>{setDateOverride(d);persist(K.dt,d);};const saveRl=d=>{setRoles(d);persist(K.rl,d);};
   const toast$=(msg,t)=>{setToast({msg,t:t||'ok'});setTimeout(()=>setToast(null),3200);};
 
   // T is the single source of truth for "today" everywhere in the app. It's the real
@@ -515,6 +553,12 @@ export default function App(){
 
   const activeC=contacts.filter(c=>!['Closed Won','Closed Lost'].includes(c.stage));
   const overdue=contacts.filter(c=>c.nextFollowUp&&c.nextFollowUp<=T).sort((a,b)=>a.nextFollowUp.localeCompare(b.nextFollowUp));
+  // Submissions with an Expected Start Date due today or already passed — a
+  // reminder to follow up and confirm the candidate actually started.
+  const startReminders=roles.flatMap(r=>(r.submissions||[])
+    .filter(s=>s.status==='Expected Start Date'&&s.expectedStartDate&&s.expectedStartDate<=T)
+    .map(s=>({...s,roleTitle:r.title,roleId:r.id})))
+    .sort((a,b)=>a.expectedStartDate.localeCompare(b.expectedStartDate));
   const activeCa=cands.filter(c=>c.status==='Active');
   const floatsWk=floats.filter(f=>f.dateSent>=WD[0]&&f.dateSent<=WD[6]);
   const callsWk=activity.filter(a=>a.type==='Call'&&a.date>=WD[0]&&a.date<=WD[6]);
@@ -623,23 +667,70 @@ export default function App(){
   };
 
   const saveClF=()=>{if(!clF.company.trim()){toast$('Company required','err');return;}const u=clM==='add'?[{...clF,id:gid(),createdAt:new Date().toISOString()},...clients]:clients.map(c=>c.id===clF.id?clF:c);saveCl(u);setClM(null);toast$(clM==='add'?'Client added':'Client updated');};
-  const addRole=()=>setClF(f=>({...f,roles:[...f.roles,newRo()]}));
-  const updRole=(rid,fld,val)=>setClF(f=>({...f,roles:f.roles.map(r=>{if(r.id!==rid)return r;const u={...r,[fld]:val};if(fld==='salary'&&val){const pct=parseFloat(f.feeFirst)||0;if(pct)u.placementFee=Math.round(parseFloat(val)*12*pct/100);}return u;})}));
-  const delRole=rid=>setClF(f=>({...f,roles:f.roles.filter(r=>r.id!==rid)}));
+
+  // Generates the PDF, triggers the download (same as before), and also
+  // uploads a copy to this candidate's CV files so it's sitting on the
+  // candidate record for next time — not just in your Downloads folder.
+  const generateAndStoreCv=async confidential=>{
+    try{
+      const doc=await buildCandidateProfileDoc(caF,confidential);
+      const filename=candidateProfileFilename(caF,confidential);
+      doc.save(filename);
+      const blob=doc.output('blob');
+      const file=new File([blob],filename,{type:'application/pdf'});
+      const path=await fileStorage.upload(caF.id,file);
+      const entry={id:gid(),name:filename,path,type:confidential?'Confidential':'Formatted',uploadedAt:new Date().toISOString()};
+      setCaF(f=>({...f,formattedCvs:[...(f.formattedCvs||[]),entry]}));
+      toast$('✓ PDF downloaded and saved to this candidate\'s CV files');
+    }catch(err){console.error(err);toast$('⚠ Could not save a copy to storage — the download still worked','err');}
+  };
+
+  const uploadOriginalCv=async file=>{
+    try{
+      const path=await fileStorage.upload(caF.id,file);
+      setCaF(f=>({...f,originalCv:{id:gid(),name:file.name,path,uploadedAt:new Date().toISOString()}}));
+      toast$('✓ Original CV uploaded');
+    }catch(err){console.error(err);toast$('⚠ Upload failed — check your connection','err');}
+  };
+
+  const removeCvFile=async(kind,fileId,path)=>{
+    try{await fileStorage.remove(path);}catch(err){console.error(err);}
+    if(kind==='original')setCaF(f=>({...f,originalCv:null}));
+    else setCaF(f=>({...f,formattedCvs:(f.formattedCvs||[]).filter(x=>x.id!==fileId)}));
+  };
+
+  const openCvFile=async path=>{
+    try{const url=await fileStorage.getUrl(path);window.open(url,'_blank');}
+    catch(err){console.error(err);toast$('⚠ Could not open that file','err');}
+  };
+
+  const saveRoleF=()=>{
+    if(!roleF.clientId){toast$('Client required','err');return;}
+    if(!roleF.title.trim()){toast$('Role title required','err');return;}
+    const u=roleM==='add'?[{...roleF,id:gid(),createdAt:new Date().toISOString()},...roles]:roles.map(r=>r.id===roleF.id?roleF:r);
+    saveRl(u);setRoleM(null);toast$(roleM==='add'?'Role added':'Role updated');
+  };
+  const addSubmission=candidateId=>{
+    const cand=cands.find(c=>c.id===candidateId);if(!cand)return;
+    setRoleF(f=>({...f,submissions:[...(f.submissions||[]),{...newSub(),candidateId:cand.id,candidateName:cand.name}]}));
+  };
+  const updSubmission=(subId,field,val)=>setRoleF(f=>({...f,submissions:(f.submissions||[]).map(s=>s.id===subId?{...s,[field]:val}:s)}));
+  const delSubmission=subId=>setRoleF(f=>({...f,submissions:(f.submissions||[]).filter(s=>s.id!==subId)}));
+
   const addInv=()=>setClF(f=>({...f,invoices:[...(f.invoices||[]),newIn()]}));
 
-  // Generates an invoice straight from a Placed role — pulls candidate, fee
-  // and currency off the role itself, seeds it as the first line item (so
-  // you can add a concession row after), and immediately downloads the PDF.
-  // Invoice number is left blank — your numbering sequence (0106, 0107...)
-  // isn't tracked in the app, so it's yours to set to avoid a collision.
-  const genInvoiceForRole=(cl,role)=>{
-    const inv={...newIn(),roleTitle:role.title,candidateName:role.candidateName,amount:role.placementFee||'',currency:role.currency||'AED',dateIssued:T,status:'Draft',items:[{...newInvItem(),desc:role.title||'Placement fee',amount:role.placementFee||''}]};
+  // Generates an invoice for a winning submission — pulls candidate, fee and
+  // currency off the Role, seeds it as the first line item, and saves it
+  // onto the Role's linked Client (invoices still live on Clients).
+  const genInvoiceForSubmission=(role,sub)=>{
+    const cl=clients.find(c=>c.id===role.clientId);
+    if(!cl){toast$('⚠ This role has no linked client — invoice not created','err');return;}
+    const inv={...newIn(),roleTitle:role.title,candidateName:sub.candidateName,amount:role.placementFee||'',currency:role.currency||'AED',dateIssued:T,status:'Draft',items:[{...newInvItem(),desc:role.title||'Placement fee',amount:role.placementFee||''}]};
     const updatedClient={...cl,invoices:[...(cl.invoices||[]),inv]};
     saveCl(clients.map(c=>c.id===cl.id?updatedClient:c));
-    setClF({...updatedClient,roles:(updatedClient.roles||[]).map(r=>({...r})),invoices:(updatedClient.invoices||[]).map(i=>({...i,items:(i.items||[]).map(it=>({...it}))}))});
+    setClF({...updatedClient,invoices:(updatedClient.invoices||[]).map(i=>({...i,items:(i.items||[]).map(it=>({...it}))}))});
     setClM('edit');
-    toast$(`✓ Invoice draft added — set the invoice number below, then click PDF`);
+    toast$(`✓ Invoice draft added to ${cl.company} — set the invoice number, then click PDF`);
   };
   const updInv=(iid,fld,val)=>setClF(f=>({...f,invoices:(f.invoices||[]).map(i=>i.id===iid?{...i,[fld]:val}:i)}));
   const delInv=iid=>setClF(f=>({...f,invoices:(f.invoices||[]).filter(i=>i.id!==iid)}));
@@ -688,8 +779,8 @@ export default function App(){
     const ca2=cands.map(c=>({...c,consultant:'AK'}));
     const fl2=floats.map(f=>({...f,consultant:'AK'}));
     const ac2=activity.map(a=>({...a,consultant:'AK'}));
-    const cl2=clients.map(cl=>({...cl,roles:(cl.roles||[]).map(r=>({...r,consultant:r.consultant?'AK':r.consultant}))}));
-    saveCo(co2);saveCa(ca2);saveFl(fl2);saveAc(ac2);saveCl(cl2);
+    const rl2=roles.map(r=>({...r,consultant:r.consultant?'AK':r.consultant}));
+    saveCo(co2);saveCa(ca2);saveFl(fl2);saveAc(ac2);saveRl(rl2);
     toast$('✓ All existing data reassigned to AK');
   };
 
@@ -744,8 +835,17 @@ export default function App(){
         // is force-attributed to AK, since Stratium is solo-operated now.
         const rc=d.contacts?d.contacts.map(c=>({...migC(c),callLog:(migC(c).callLog||[]).map(en=>({...en,consultant:'AK'}))})):null;
         if(rc)saveCo(rc);
-        if(d.clients)saveCl(d.clients.map(c=>({invoices:[],...c,roles:(c.roles||[]).map(r=>({...r,consultant:r.consultant?'AK':r.consultant}))})));
-        if(d.candidates)saveCa(d.candidates.map(c=>({...c,consultant:'AK'})));
+        if(d.clients){
+          const restoredClients=d.clients.map(c=>({invoices:[],...c}));
+          // Legacy backups may still have roles nested in each client — pull
+          // those into the standalone Roles list instead of dropping them.
+          const legacyRoles=d.clients.filter(c=>Array.isArray(c.roles)&&c.roles.length)
+            .flatMap(c=>c.roles.map(r=>({...newRole(),...r,clientId:c.id,consultant:'AK',
+              submissions:r.candidateName?[{...newSub(),candidateName:r.candidateName,status:r.status==='Placed'?'Placed/Started':'Submitted'}]:[]})));
+          saveCl(restoredClients.map(c=>{const{roles,...rest}=c;return rest;}));
+          if(d.roles||legacyRoles.length)saveRl([...(d.roles||[]).map(r=>({...r,consultant:'AK'})),...legacyRoles]);
+        }
+        if(d.candidates)saveCa(d.candidates.map(c=>({originalCv:null,formattedCvs:[],...c,consultant:'AK'})));
         if(d.floats)saveFl(d.floats.map(f=>({...f,dateSent:normD(f.dateSent),consultant:'AK'})));
         if(d.targets){saveTg(d.targets);setTgEdit({...d.targets});}
         const callsFromLogs=(rc||[]).flatMap(c=>(c.callLog||[]).filter(en=>en&&en.date).map(en=>({id:en.id||gid(),date:normD(en.date),type:'Call',contact:c.name||'',company:c.company||'',outcome:en.notes||'',nextSteps:en.nextSteps||'',consultant:'AK'})));
@@ -799,7 +899,7 @@ export default function App(){
             {gRes.co.length>0&&<div><div style={{padding:'8px 12px 4px',fontSize:10,color:P.tm,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>Pipeline</div>{gRes.co.map(c=><div key={c.id} onMouseDown={()=>{setTab('contacts');setHistModal(c.id);setGq('');setGOpen(false);}} style={{padding:'8px 12px',cursor:'pointer',borderTop:`1px solid ${P.bo}`}}><div style={{fontSize:12,fontWeight:600}}>{c.name}</div><div style={{fontSize:11,color:P.ts}}>{c.company}</div></div>)}</div>}
             {gRes.ca.length>0&&<div><div style={{padding:'8px 12px 4px',fontSize:10,color:P.tm,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>Candidates</div>{gRes.ca.map(c=><div key={c.id} onMouseDown={()=>{setTab('cands');setCaF({...c});setCaM('edit');setGq('');setGOpen(false);}} style={{padding:'8px 12px',cursor:'pointer',borderTop:`1px solid ${P.bo}`}}><div style={{fontSize:12,fontWeight:600}}>{c.name}</div><div style={{fontSize:11,color:P.ts}}>{c.currentRole}{c.currentCompany?` · ${c.currentCompany}`:''}</div></div>)}</div>}
             {gRes.fl.length>0&&<div><div style={{padding:'8px 12px 4px',fontSize:10,color:P.tm,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>Floats</div>{gRes.fl.map(f=><div key={f.id} onMouseDown={()=>{setTab('floats');setFlF({...f});setFlM('edit');setGq('');setGOpen(false);}} style={{padding:'8px 12px',cursor:'pointer',borderTop:`1px solid ${P.bo}`}}><div style={{fontSize:12,fontWeight:600}}>{f.candidateName}</div><div style={{fontSize:11,color:P.ts}}>{f.companyName}</div></div>)}</div>}
-            {gRes.cl.length>0&&<div><div style={{padding:'8px 12px 4px',fontSize:10,color:P.tm,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>Clients</div>{gRes.cl.map(c=><div key={c.id} onMouseDown={()=>{setTab('clients');setClF({...c,roles:(c.roles||[]).map(r=>({...r})),invoices:(c.invoices||[]).map(i=>({...i}))});setClM('edit');setGq('');setGOpen(false);}} style={{padding:'8px 12px',cursor:'pointer',borderTop:`1px solid ${P.bo}`}}><div style={{fontSize:12,fontWeight:600}}>{c.company}</div><div style={{fontSize:11,color:P.ts}}>{c.contactName}</div></div>)}</div>}
+            {gRes.cl.length>0&&<div><div style={{padding:'8px 12px 4px',fontSize:10,color:P.tm,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:600}}>Clients</div>{gRes.cl.map(c=><div key={c.id} onMouseDown={()=>{setTab('clients');setClF({...c,invoices:(c.invoices||[]).map(i=>({...i}))});setClM('edit');setGq('');setGOpen(false);}} style={{padding:'8px 12px',cursor:'pointer',borderTop:`1px solid ${P.bo}`}}><div style={{fontSize:12,fontWeight:600}}>{c.company}</div><div style={{fontSize:11,color:P.ts}}>{c.contactName}</div></div>)}</div>}
           </div>}
         </div>
 
@@ -829,11 +929,19 @@ export default function App(){
               <Stat lbl="Meetings This Month" val={mtgsMo.length} col={P.pu}/>
               <Stat lbl="Floats This Month" val={floatsMo.length} sub={`This week: ${floatsWk.length}`} col={P.or}/>
               <Stat lbl="Overdue Follow-ups" val={overdue.length} col={overdue.length>0?P.rd:P.gy}/>
+              <Stat lbl="Start Dates Due" val={startReminders.length} col={startReminders.length>0?P.vi:P.gy}/>
             </div>
             <div style={{display:'grid',gridTemplateColumns:mobile?'1fr':'1fr 1fr',gap:16}}>
               <div style={{...CARD,padding:20}}>
                 <div style={{fontSize:15,fontWeight:600,marginBottom:12}}>Action Required</div>
-                {!overdue.length&&<div style={{color:P.tm,fontSize:12,fontStyle:'italic'}}>All clear.</div>}
+                {!overdue.length&&!startReminders.length&&<div style={{color:P.tm,fontSize:12,fontStyle:'italic'}}>All clear.</div>}
+                {startReminders.slice(0,4).map(s=><div key={s.id} onClick={()=>{const r=roles.find(x=>x.id===s.roleId);if(r){setRoleF({...r,submissions:(r.submissions||[]).map(x=>({...x}))});setRoleM('edit');}}} style={{display:'flex',gap:10,padding:'9px 0',borderBottom:`1px solid ${P.bo}`,cursor:'pointer'}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:600,fontSize:12}}>{s.candidateName} <span style={{color:P.vi,fontWeight:500}}>· starting</span></div>
+                    <div style={{fontSize:11,color:P.ts}}>{s.roleTitle}</div>
+                  </div>
+                  <div style={{flexShrink:0,textAlign:'right'}}><div style={{fontSize:11,color:P.vi,fontWeight:600}}>{s.expectedStartDate}</div></div>
+                </div>)}
                 {overdue.slice(0,7).map(c=><div key={c.id} style={{display:'flex',gap:10,padding:'9px 0',borderBottom:`1px solid ${P.bo}`}}>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:600,fontSize:12}}>{c.name}</div>
@@ -969,10 +1077,14 @@ export default function App(){
             </div>
             {!filtCa.length&&<div style={{...CARD,padding:40,textAlign:'center',color:P.ts}}>{cands.length?'No candidates match your filters.':'No candidates yet.'}</div>}
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(310px,1fr))',gap:14}}>
-              {filtCa.map(c=>{const cf=floats.filter(f=>f.candidateId===c.id||f.candidateName===c.name);return(
+              {filtCa.map(c=>{
+                const cf=floats.filter(f=>f.candidateId===c.id||f.candidateName===c.name);
+                const subs=roles.flatMap(r=>(r.submissions||[]).filter(s=>s.candidateId===c.id).map(s=>({...s,roleTitle:r.title,roleId:r.id,clientName:(clients.find(cl=>cl.id===r.clientId)||{}).company})));
+                const cvCount=(c.originalCv?1:0)+(c.formattedCvs||[]).length;
+                return(
                 <div key={c.id} style={{...CARD,padding:18}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
-                    <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:15}}>{c.name}</div><div style={{fontSize:12,color:P.ts,marginTop:2}}>{c.currentRole}{c.currentCompany?` · ${c.currentCompany}`:''}</div></div>
+                    <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:15}}>{c.name}{cvCount>0&&<span title={`${cvCount} CV file(s)`} style={{marginLeft:6,fontSize:11,color:P.ac}}>📎{cvCount}</span>}</div><div style={{fontSize:12,color:P.ts,marginTop:2}}>{c.currentRole}{c.currentCompany?` · ${c.currentCompany}`:''}</div></div>
                     <div style={{display:'flex',gap:4,alignItems:'center',flexShrink:0,marginLeft:8}}>
                       <ISel value={c.status} opts={CSS2} cm={CC} onSave={v=>updCa(c.id,'status',v)}/>
                       <button style={btsm()} onClick={()=>{setCaF({...c});setCaM('edit');}}>Edit</button>
@@ -986,6 +1098,13 @@ export default function App(){
                     <div><div style={{fontSize:10,color:P.tm,marginBottom:1}}>Consultant</div><div style={{fontWeight:500}}>{c.consultant||'—'}</div></div>
                   </div>
                   {c.notes&&<div style={{fontSize:12,color:P.ts,padding:'8px 10px',background:PANEL,borderRadius:7,marginBottom:10,borderLeft:`3px solid ${P.bo}`}}>{c.notes}</div>}
+                  {subs.length>0&&<div style={{marginBottom:8}}>
+                    <div style={{fontSize:10,color:P.tm,marginBottom:6,textTransform:'uppercase',letterSpacing:'0.5px'}}>Submitted to Roles ({subs.length})</div>
+                    {subs.map(s=><div key={s.id} onClick={()=>{const r=roles.find(x=>x.id===s.roleId);if(r){setRoleF({...r,submissions:(r.submissions||[]).map(x=>({...x}))});setRoleM('edit');}}} style={{padding:'4px 0',borderBottom:`1px solid ${P.bo}`,fontSize:11,cursor:'pointer'}}>
+                      <div style={{display:'flex',justifyContent:'space-between'}}><span style={{fontWeight:600}}>{s.roleTitle}{s.clientName?<span style={{color:P.ts}}> · {s.clientName}</span>:''}</span><Bge l={s.status} c={SUBC[s.status]||P.gy}/></div>
+                      {s.feedback&&<div style={{color:P.ts,marginTop:2}}>{s.feedback}</div>}
+                    </div>)}
+                  </div>}
                   {cf.length>0&&<div style={{marginBottom:8}}>
                     <div style={{fontSize:10,color:P.tm,marginBottom:6,textTransform:'uppercase',letterSpacing:'0.5px'}}>Floated to ({cf.length})</div>
                     {cf.map(fl=><div key={fl.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'4px 0',borderBottom:`1px solid ${P.bo}`,fontSize:11}}>
@@ -997,6 +1116,65 @@ export default function App(){
                 </div>
               );})}
             </div>
+          </div>}
+
+          {/* ROLES */}
+          {tab==='roles'&&<div style={{padding:24}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,flexWrap:'wrap',gap:10}}>
+              <div style={{fontSize:18,fontWeight:700,fontFamily:SERIF}}>Roles</div>
+              <button style={btp()} onClick={()=>{setRoleF(newRole());setRoleM('add');}}>+ Add Role</button>
+            </div>
+            <div style={{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{display:'flex',gap:4,background:P.wh,borderRadius:8,border:`1px solid ${P.bo}`,padding:4}}>
+                {['Live','Won','Lost','All'].map(s=><button key={s} onClick={()=>setRoleStatusFilter(s)} style={{padding:'5px 14px',borderRadius:6,border:'none',background:roleStatusFilter===s?P.ac:'transparent',color:roleStatusFilter===s?'#fff':P.ts,cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600}}>{s}</button>)}
+              </div>
+              {roleClientFilter&&<div style={{display:'flex',gap:6,alignItems:'center',padding:'5px 10px',background:`${P.ac}10`,border:`1px solid ${P.ac}30`,borderRadius:8}}>
+                <span style={{fontSize:12,color:P.ac,fontWeight:600}}>{(clients.find(c=>c.id===roleClientFilter)||{}).company||'Client'}</span>
+                <button onClick={()=>setRoleClientFilter(null)} style={{background:'none',border:'none',color:P.ac,cursor:'pointer',fontSize:13}}>✕</button>
+              </div>}
+            </div>
+            {(()=>{
+              const grouped=roles.filter(r=>{
+                if(roleClientFilter&&r.clientId!==roleClientFilter)return false;
+                if(roleStatusFilter==='Live')return !['Placed','Lost','Cancelled'].includes(r.status);
+                if(roleStatusFilter==='Won')return r.status==='Placed';
+                if(roleStatusFilter==='Lost')return ['Lost','Cancelled'].includes(r.status);
+                return true;
+              });
+              if(!grouped.length)return <div style={{...CARD,padding:40,textAlign:'center',color:P.ts}}>{roles.length?'No roles match this filter.':'No roles yet — add your first mandate above.'}</div>;
+              return <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:14}}>
+                {grouped.map(role=>{
+                  const cl=clients.find(c=>c.id===role.clientId);
+                  const subs=role.submissions||[];
+                  const openModal=()=>{setRoleF({...role,submissions:subs.map(s=>({...s}))});setRoleM('edit');};
+                  return <div key={role.id} style={{...CARD,padding:18}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
+                      <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={openModal}>
+                        <div style={{fontWeight:700,fontSize:15}}>{role.title||'(Untitled role)'}</div>
+                        <div style={{fontSize:12,color:P.ts,marginTop:2}}>{cl?cl.company:'(No client linked)'}</div>
+                      </div>
+                      <div style={{display:'flex',gap:4,alignItems:'center',flexShrink:0,marginLeft:8}}>
+                        <Bge l={role.status} c={RC[role.status]||P.ts}/>
+                        <button style={btsm(P.rd)} onClick={()=>delOk(role.title||'this role',()=>{saveRl(roles.filter(r=>r.id!==role.id));setConf(null);toast$('Deleted');})}>×</button>
+                      </div>
+                    </div>
+                    <div style={{display:'flex',gap:10,fontSize:11,color:P.ts,flexWrap:'wrap',marginBottom:10}}>
+                      {role.consultant&&<span>{role.consultant}</span>}
+                      {role.contactPerson&&<span>👤 {role.contactPerson}</span>}
+                      {role.salary&&<span>{role.currency||'AED'} {Number(role.salary).toLocaleString()}/mo</span>}
+                      {role.placementFee&&<span style={{color:P.gn,fontWeight:600}}>Fee: {role.currency||'AED'} {Number(role.placementFee).toLocaleString()}</span>}
+                    </div>
+                    <div style={{fontSize:10,color:P.tm,marginBottom:6,textTransform:'uppercase',letterSpacing:'0.5px'}}>Submissions ({subs.length})</div>
+                    {!subs.length&&<div style={{fontSize:11,color:P.tm,fontStyle:'italic',marginBottom:8}}>None yet.</div>}
+                    {subs.slice(0,4).map(s=><div key={s.id} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:`1px solid ${P.bo}`,fontSize:11}}>
+                      <span style={{fontWeight:600}}>{s.candidateName}</span><Bge l={s.status} c={SUBC[s.status]||P.gy}/>
+                    </div>)}
+                    {subs.length>4&&<div style={{fontSize:10,color:P.tm,marginTop:4}}>+{subs.length-4} more</div>}
+                    <button onClick={openModal} style={{width:'100%',marginTop:10,padding:'7px',borderRadius:7,border:`1px dashed ${P.bo}`,background:'transparent',color:P.ts,cursor:'pointer',fontSize:11,fontFamily:'inherit'}}>Open Role →</button>
+                  </div>;
+                })}
+              </div>;
+            })()}
           </div>}
 
           {/* FLOATS */}
@@ -1131,27 +1309,31 @@ export default function App(){
             {!clients.length&&<div style={{...CARD,padding:60,textAlign:'center',color:P.ts}}><div style={{fontSize:17,color:P.tm,marginBottom:8}}>No clients yet</div>Add your first signed client.</div>}
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(440px,1fr))',gap:16}}>
               {clients.map(cl=>{
-                const fees=(cl.roles||[]).reduce((a,r)=>a+(r.status==='Placed'&&r.placementFee?+r.placementFee:0),0);
+                const clRoles=roles.filter(r=>r.clientId===cl.id);
+                const liveRoles=clRoles.filter(r=>!['Placed','Lost','Cancelled'].includes(r.status));
+                const wonRoles=clRoles.filter(r=>r.status==='Placed');
+                const lostRoles=clRoles.filter(r=>['Lost','Cancelled'].includes(r.status));
+                const fees=clRoles.reduce((a,r)=>a+(r.status==='Placed'&&r.placementFee?+r.placementFee:0),0);
                 const invT=(cl.invoices||[]).reduce((a,i)=>a+(+i.amount||0),0);
                 const invP=(cl.invoices||[]).filter(i=>['Paid','Cleared'].includes(i.status)).reduce((a,i)=>a+(+i.amount||0),0);
                 const invOD=(cl.invoices||[]).filter(i=>['Overdue','Written Off'].includes(i.status));
                 return <div key={cl.id} style={{...CARD,padding:22}}>
                   <div style={{display:'flex',justifyContent:'space-between',marginBottom:14}}>
                     <div><div style={{fontSize:18,fontWeight:700}}>{cl.company}</div><div style={{fontSize:12,color:P.ts,marginTop:2}}>{cl.contactName}{cl.contactTitle?` · ${cl.contactTitle}`:''}</div></div>
-                    <div style={{display:'flex',gap:4,flexShrink:0}}><button style={btsm()} onClick={()=>{setClF({...cl,roles:(cl.roles||[]).map(r=>({...r})),invoices:(cl.invoices||[]).map(i=>({...i}))});setClM('edit');}}>Edit</button><button style={btsm(P.rd)} onClick={()=>delOk(cl.company,()=>{saveCl(clients.filter(c=>c.id!==cl.id));setConf(null);toast$('Deleted');})}>Del</button></div>
+                    <div style={{display:'flex',gap:4,flexShrink:0}}><button style={btsm()} onClick={()=>{setClF({...cl,invoices:(cl.invoices||[]).map(i=>({...i}))});setClM('edit');}}>Edit</button><button style={btsm(P.rd)} onClick={()=>delOk(cl.company,()=>{saveCl(clients.filter(c=>c.id!==cl.id));setConf(null);toast$('Deleted');})}>Del</button></div>
                   </div>
                   <div style={{display:'flex',marginBottom:cl.contractLink?10:14,borderRadius:8,border:`1px solid ${P.bo}`,overflow:'hidden'}}>
                     {[{l:'1st Role',v:`${cl.feeFirst||'—'}%`,c:P.gn},{l:'Subsequent',v:`${cl.feeSubsequent||'—'}%`,c:P.ac},{l:'Terms',v:cl.paymentTerms||'—',c:P.ts},{l:'Fees',v:fees?`AED ${(fees/1000).toFixed(0)}k`:'—',c:P.ac}].map((item,idx)=><div key={item.l} style={{flex:1,padding:'10px 6px',textAlign:'center',background:PANEL,borderRight:idx<3?`1px solid ${P.bo}`:'none'}}><div style={{fontWeight:700,fontSize:14,color:item.c}}>{item.v}</div><div style={{fontSize:10,color:P.tm,marginTop:2}}>{item.l}</div></div>)}
                   </div>
                   {cl.contractLink&&<div style={{marginBottom:12,padding:'7px 10px',background:PANEL,borderRadius:7,border:`1px solid ${P.bo}`,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:11,color:P.ts}}>📄</span><a href={cl.contractLink} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:P.bl}}>View Contract</a></div>}
                   {invOD.length>0&&<div style={{marginBottom:10,padding:'7px 10px',background:`${P.rd}08`,borderRadius:7,border:`1px solid ${P.rd}30`,fontSize:11,color:P.rd,fontWeight:600}}>⚠ {invOD.length} invoice{invOD.length>1?'s':''} overdue or written off</div>}
-                  <div style={{fontSize:11,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:8}}>Roles ({(cl.roles||[]).length})</div>
-                  {!(cl.roles||[]).length&&<div style={{fontSize:12,color:P.tm,marginBottom:8,fontStyle:'italic'}}>No roles added.</div>}
-                  {(cl.roles||[]).map(r=><div key={r.id} style={{padding:'9px 12px',background:PANEL,borderRadius:8,marginBottom:6,border:`1px solid ${r.status==='Placed'?`${P.gn}40`:P.bo}`}}>
-                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:3}}><div style={{fontWeight:600,fontSize:12}}>{r.title||'(Untitled)'}</div><div style={{display:'flex',gap:4,alignItems:'center'}}>{r.consultant&&<span style={{fontSize:10,color:P.ts}}>{r.consultant}</span>}<Bge l={r.status} c={RC[r.status]||P.ts}/></div></div>
-                    <div style={{display:'flex',gap:10,fontSize:11,color:P.ts,flexWrap:'wrap'}}>{r.contactPerson&&<span>👤 {r.contactPerson}</span>}{r.cvsSubmitted>0&&<span>{r.cvsSubmitted} CVs</span>}{r.candidateName&&<span style={{color:P.tx,fontWeight:600}}>✓ {r.candidateName}</span>}{r.placementFee&&<span style={{color:P.gn,fontWeight:600}}>Fee: AED {Number(r.placementFee).toLocaleString()}</span>}</div>
-                    {r.status==='Placed'&&r.placementFee&&<button onClick={()=>genInvoiceForRole(cl,r)} style={{...btsm(P.ac),marginTop:6}}>Generate Invoice</button>}
-                  </div>)}
+                  {clRoles.length>0
+                    ?<button onClick={()=>{setRoleClientFilter(cl.id);setTab('roles');}} style={{width:'100%',textAlign:'left',padding:'9px 12px',background:PANEL,borderRadius:8,border:`1px solid ${P.bo}`,marginBottom:12,cursor:'pointer',fontFamily:'inherit'}}>
+                      <span style={{fontSize:12,fontWeight:600,color:P.ac}}>{clRoles.length} role{clRoles.length!==1?'s':''} →</span>
+                      <span style={{fontSize:11,color:P.ts,marginLeft:8}}>{liveRoles.length} live · {wonRoles.length} won · {lostRoles.length} lost</span>
+                    </button>
+                    :<button onClick={()=>{setRoleF({...newRole(),clientId:cl.id});setRoleM('add');}} style={{width:'100%',padding:'9px 12px',background:'transparent',borderRadius:8,border:`1px dashed ${P.bo}`,marginBottom:12,cursor:'pointer',fontFamily:'inherit',color:P.ts,fontSize:12}}>+ Add a role for this client (opens Roles tab)</button>
+                  }
                   {(cl.invoices||[]).length>0&&<div style={{marginTop:10}}>
                     <div style={{fontSize:11,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:6,display:'flex',justifyContent:'space-between'}}><span>Invoices ({(cl.invoices||[]).length})</span>{invT>0&&<span style={{color:P.ac}}>AED {(invP/1000).toFixed(0)}k / {(invT/1000).toFixed(0)}k cleared</span>}</div>
                     {(cl.invoices||[]).map(inv=><div key={inv.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 10px',background:PANEL,borderRadius:7,marginBottom:4,border:`1px solid ${['Written Off','Waived'].includes(inv.status)?`${P.rd}30`:P.bo}`}}>
@@ -1219,22 +1401,37 @@ export default function App(){
         </div>
 
         <div style={{borderTop:`1px solid ${P.bo}`,marginTop:18,paddingTop:16}}>
-          <div style={{fontSize:13,fontWeight:700,marginBottom:10,fontFamily:SERIF,color:P.ac}}>CV Profile</div>
+          <div style={{fontSize:13,fontWeight:700,marginBottom:10,fontFamily:SERIF,color:P.ac}}>CV Files</div>
+          <div style={{display:'grid',gap:8,marginBottom:14}}>
+            {caF.originalCv
+              ?<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:PANEL,borderRadius:8,border:`1px solid ${P.bo}`}}>
+                <div><Bge l="Original" c={P.bl}/> <span style={{fontSize:12,marginLeft:6}}>{caF.originalCv.name}</span></div>
+                <div style={{display:'flex',gap:6}}><button onClick={()=>openCvFile(caF.originalCv.path)} style={{...btsm(P.bl),padding:'2px 8px'}}>Open</button><button onClick={()=>removeCvFile('original',null,caF.originalCv.path)} style={{...btsm(P.rd),padding:'2px 8px'}}>✕</button></div>
+              </div>
+              :<div>
+                <div style={LB_S}>Upload Original CV <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(.docx — stores the file here AND extracts text into CV Body below)</span></div>
+                <input type="file" accept=".docx" onChange={async e=>{
+                  const file=e.target.files[0];if(!file)return;
+                  await uploadOriginalCv(file);
+                  try{
+                    const buf=await file.arrayBuffer();
+                    const result=await mammoth.extractRawText({arrayBuffer:buf});
+                    setCaF(f=>({...f,cvBody:result.value}));
+                  }catch(err){console.error(err);toast$('⚠ Stored the file, but could not extract its text — paste the CV body manually','err');}
+                  e.target.value='';
+                }} style={{...INP,padding:'6px 8px'}}/>
+              </div>
+            }
+            {(caF.formattedCvs||[]).map(f=><div key={f.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:PANEL,borderRadius:8,border:`1px solid ${P.bo}`}}>
+              <div><Bge l={f.type} c={f.type==='Confidential'?P.tm:P.ac}/> <span style={{fontSize:12,marginLeft:6}}>{f.name}</span></div>
+              <div style={{display:'flex',gap:6}}><button onClick={()=>openCvFile(f.path)} style={{...btsm(P.bl),padding:'2px 8px'}}>Open</button><button onClick={()=>removeCvFile('formatted',f.id,f.path)} style={{...btsm(P.rd),padding:'2px 8px'}}>✕</button></div>
+            </div>)}
+            {!caF.originalCv&&!(caF.formattedCvs||[]).length&&<div style={{fontSize:11,color:P.tm,fontStyle:'italic'}}>No files yet.</div>}
+          </div>
+
+          <div style={{fontSize:13,fontWeight:700,marginBottom:10,fontFamily:SERIF,color:P.ac}}>CV Profile Builder</div>
           <div style={G2}>
             <div><div style={LB_S}>Position Applied</div><input value={caF.positionApplied||''} onChange={e=>setCaF(f=>({...f,positionApplied:e.target.value}))} placeholder="Defaults to Current Role if blank" style={INP}/></div>
-            <div>
-              <div style={LB_S}>Upload Original CV <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(.docx — extracts text below)</span></div>
-              <input type="file" accept=".docx" onChange={async e=>{
-                const file=e.target.files[0];if(!file)return;
-                try{
-                  const buf=await file.arrayBuffer();
-                  const result=await mammoth.extractRawText({arrayBuffer:buf});
-                  setCaF(f=>({...f,cvBody:result.value}));
-                  toast$('✓ CV text extracted — review and redact below before generating');
-                }catch(err){console.error(err);toast$('⚠ Could not read that file — try pasting the text directly','err');}
-                e.target.value='';
-              }} style={{...INP,padding:'6px 8px'}}/>
-            </div>
           </div>
           <div style={{marginTop:10}}>
             <div style={LB_S}>Candidate Summary <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(one bullet per line — shown on the cover page)</span></div>
@@ -1245,12 +1442,53 @@ export default function App(){
             <textarea value={caF.cvBody||''} onChange={e=>setCaF(f=>({...f,cvBody:e.target.value}))} rows={10} style={{...INP_TA,fontFamily:'monospace',fontSize:11.5}}/>
           </div>
           <div style={{display:'flex',gap:8,marginTop:10}}>
-            <button onClick={()=>downloadCandidateProfilePDF(caF,true)} style={{...btp(P.tx),color:P.bg}}>Download Confidential PDF</button>
-            <button onClick={()=>downloadCandidateProfilePDF(caF,false)} style={btp()}>Download Formatted PDF</button>
+            <button onClick={()=>generateAndStoreCv(true)} style={{...btp(P.tx),color:P.bg}}>Generate Confidential PDF</button>
+            <button onClick={()=>generateAndStoreCv(false)} style={btp()}>Generate Formatted PDF</button>
           </div>
         </div>
 
         <div style={{display:'flex',gap:8,marginTop:20,justifyContent:'flex-end'}}><button style={bts()} onClick={()=>setCaM(null)}>Cancel</button><button style={btp()} onClick={saveCaF}>Save Candidate</button></div>
+      </Mod>}
+
+      {roleM&&<Mod title={roleM==='add'?'Add Role':'Edit Role'} onX={()=>setRoleM(null)} wide={true}>
+        <div style={G2}>
+          <div style={{gridColumn:'span 2'}}><div style={LB_S}>Client *</div><select value={roleF.clientId||''} onChange={e=>setRoleF(f=>({...f,clientId:e.target.value}))} style={INP}><option value="">Select a client...</option>{clients.map(c=><option key={c.id} value={c.id}>{c.company}</option>)}</select></div>
+          <div style={{gridColumn:'span 2'}}><div style={LB_S}>Role Title *</div><input value={roleF.title||''} onChange={e=>setRoleF(f=>({...f,title:e.target.value}))} style={INP}/></div>
+          <div><div style={LB_S}>Status</div><select value={roleF.status||'Briefed'} onChange={e=>setRoleF(f=>({...f,status:e.target.value}))} style={INP}>{RS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
+          <div><div style={LB_S}>Managed By</div><select value={roleF.consultant||'AK'} onChange={e=>setRoleF(f=>({...f,consultant:e.target.value}))} style={INP}>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><div style={LB_S}>Contact at Client</div><input value={roleF.contactPerson||''} onChange={e=>setRoleF(f=>({...f,contactPerson:e.target.value}))} style={INP}/></div>
+          <div><div style={LB_S}>Date Opened</div><input type="date" value={roleF.dateOpened||''} onChange={e=>setRoleF(f=>({...f,dateOpened:e.target.value}))} style={INP}/></div>
+          <div><div style={LB_S}>Currency</div><select value={roleF.currency||'AED'} onChange={e=>setRoleF(f=>({...f,currency:e.target.value}))} style={INP}>{CURR.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><div style={LB_S}>Monthly Salary</div><input type="number" min="0" value={roleF.salary||''} onChange={e=>setRoleF(f=>({...f,salary:e.target.value}))} style={INP}/></div>
+          <div style={{gridColumn:'span 2'}}><div style={LB_S}>Placement Fee</div><input type="number" min="0" value={roleF.placementFee||''} onChange={e=>setRoleF(f=>({...f,placementFee:e.target.value}))} style={{...INP,color:roleF.placementFee?P.gn:P.tx,fontWeight:roleF.placementFee?700:400}}/></div>
+          <div style={{gridColumn:'span 2'}}><div style={LB_S}>Notes</div><textarea value={roleF.notes||''} onChange={e=>setRoleF(f=>({...f,notes:e.target.value}))} rows={2} style={INP_TA}/></div>
+        </div>
+
+        <div style={{borderTop:`1px solid ${P.bo}`,marginTop:18,paddingTop:16}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <div style={{fontSize:13,fontWeight:700,fontFamily:SERIF,color:P.ac}}>Submissions ({(roleF.submissions||[]).length})</div>
+            <select onChange={e=>{if(e.target.value)addSubmission(e.target.value);e.target.value='';}} value="" style={{...INP,width:'auto'}}>
+              <option value="">+ Add a candidate...</option>
+              {cands.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          {!(roleF.submissions||[]).length&&<div style={{fontSize:12,color:P.tm,fontStyle:'italic'}}>No submissions yet.</div>}
+          {(roleF.submissions||[]).map(s=><div key={s.id} style={{padding:12,background:PANEL,borderRadius:8,marginBottom:8,border:`1px solid ${P.bo}`}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,marginBottom:8,alignItems:'end'}}>
+              <div><div style={LB_S}>Candidate</div><div style={{fontSize:13,fontWeight:600,padding:'9px 0'}}>{s.candidateName}</div></div>
+              <div><div style={LB_S}>Status</div><select value={s.status||'Submitted'} onChange={e=>updSubmission(s.id,'status',e.target.value)} style={INP}>{SUBS.map(st=><option key={st} value={st}>{st}</option>)}</select></div>
+              <button onClick={()=>delSubmission(s.id)} style={{marginBottom:1,padding:'9px 10px',borderRadius:6,border:`1px solid ${P.rd}30`,background:`${P.rd}08`,color:P.rd,cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>✕</button>
+            </div>
+            {s.status==='Expected Start Date'&&<div style={{marginBottom:8}}>
+              <div style={LB_S}>Expected Start Date <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(shows as a follow-up reminder on the Dashboard)</span></div>
+              <input type="date" value={s.expectedStartDate||''} onChange={e=>updSubmission(s.id,'expectedStartDate',e.target.value)} style={{...INP,width:'auto'}}/>
+            </div>}
+            <div><div style={LB_S}>Feedback / Notes</div><textarea value={s.feedback||''} onChange={e=>updSubmission(s.id,'feedback',e.target.value)} rows={2} style={INP_TA}/></div>
+            {s.status==='Placed/Started'&&roleF.placementFee&&<button onClick={()=>genInvoiceForSubmission(roleF,s)} style={{...btsm(P.ac),marginTop:8}}>Generate Invoice</button>}
+          </div>)}
+        </div>
+
+        <div style={{display:'flex',gap:8,marginTop:20,justifyContent:'flex-end'}}><button style={bts()} onClick={()=>setRoleM(null)}>Cancel</button><button style={btp()} onClick={saveRoleF}>Save Role</button></div>
       </Mod>}
 
       {flM&&<Mod title={flM==='add'?'Add Float':'Edit Float'} onX={()=>setFlM(null)}>
@@ -1302,25 +1540,6 @@ export default function App(){
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Contract Link</div><input value={clF.contractLink||''} onChange={e=>setClF(f=>({...f,contractLink:e.target.value}))} placeholder="https://..." style={INP}/></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Notes</div><textarea value={clF.notes||''} onChange={e=>setClF(f=>({...f,notes:e.target.value}))} rows={2} style={INP_TA}/></div>
         </div>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div style={{fontSize:12,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px'}}>Roles ({clF.roles.length})</div><button style={{...bts(),padding:'4px 12px',fontSize:11}} onClick={addRole}>+ Add Role</button></div>
-        {clF.roles.map(r=><div key={r.id} style={{padding:12,background:PANEL,borderRadius:8,marginBottom:8,border:`1px solid ${P.bo}`}}>
-          <div style={{display:'grid',gridTemplateColumns:'1fr auto auto auto',gap:8,marginBottom:8,alignItems:'end'}}>
-            <div><div style={LB_S}>Title</div><input value={r.title||''} onChange={e=>updRole(r.id,'title',e.target.value)} style={INP}/></div>
-            <div><div style={LB_S}>Status</div><select value={r.status||'Briefed'} onChange={e=>updRole(r.id,'status',e.target.value)} style={{...INP,width:'auto'}}>{RS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
-            <div><div style={LB_S}>CVs</div><input type="number" min="0" value={r.cvsSubmitted||0} onChange={e=>updRole(r.id,'cvsSubmitted',e.target.value)} style={{...INP,width:60}}/></div>
-            <button onClick={()=>delRole(r.id)} style={{marginBottom:1,padding:'9px 10px',borderRadius:6,border:`1px solid ${P.rd}30`,background:`${P.rd}08`,color:P.rd,cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>✕</button>
-          </div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:8}}>
-            <div><div style={LB_S}>Contact at Client</div><input value={r.contactPerson||''} onChange={e=>updRole(r.id,'contactPerson',e.target.value)} style={INP}/></div>
-            <div><div style={LB_S}>Managed By</div><select value={r.consultant||''} onChange={e=>updRole(r.id,'consultant',e.target.value)} style={INP}><option value="">—</option>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
-            <div><div style={LB_S}>Candidate Placed</div><input value={r.candidateName||''} onChange={e=>updRole(r.id,'candidateName',e.target.value)} style={INP}/></div>
-          </div>
-          <div style={{display:'grid',gridTemplateColumns:'auto 1fr 1fr',gap:8}}>
-            <div><div style={LB_S}>Currency</div><select value={r.currency||'AED'} onChange={e=>updRole(r.id,'currency',e.target.value)} style={INP}>{CURR.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
-            <div><div style={LB_S}>Monthly Salary</div><input type="number" min="0" value={r.salary||''} onChange={e=>updRole(r.id,'salary',e.target.value)} style={INP}/></div>
-            <div><div style={LB_S}>Fee Generated</div><input type="number" min="0" value={r.placementFee||''} onChange={e=>updRole(r.id,'placementFee',e.target.value)} style={{...INP,color:r.placementFee?P.gn:P.tx,fontWeight:r.placementFee?700:400}}/></div>
-          </div>
-        </div>)}
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,marginTop:16}}><div style={{fontSize:12,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px'}}>Invoices ({(clF.invoices||[]).length})</div><button style={{...bts(),padding:'4px 12px',fontSize:11}} onClick={addInv}>+ Add Invoice</button></div>
         {(clF.invoices||[]).map(inv=><div key={inv.id} style={{padding:12,background:PANEL,borderRadius:8,marginBottom:8,border:`1px solid ${P.bo}`}}>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto auto auto',gap:8,marginBottom:8,alignItems:'end'}}>
