@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { storage } from "./storage";
 import { supabase } from "./supabaseClient";
 import { jsPDF } from "jspdf";
+import mammoth from "mammoth";
 import logo from "./assets/stratium-monogram.png";
 
 const K={co:'bd_crm_v2',cl:'st_clients_v1',ca:'st_candidates_v1',fl:'st_floats_v1',ac:'st_activity_v1',tg:'st_bd_targets_v1',dt:'st_date_override_v1'};
@@ -66,9 +67,11 @@ const migC=c=>{
   };
 };
 const newCo=()=>({id:gid(),name:'',title:'',company:'',industry:'',phone:'',phone2:'',email:'',stage:'Cold',lastContact:'',nextFollowUp:'',notes:'',nextSteps:'',callLog:[],createdAt:new Date().toISOString()});
-const newCa=()=>({id:gid(),name:'',currentRole:'',currentCompany:'',availability:'Immediate',salaryExpectation:'',currency:'AED',nationality:'',status:'Active',notes:'',consultant:'AK',createdAt:new Date().toISOString()});
+const newCa=()=>({id:gid(),name:'',currentRole:'',currentCompany:'',availability:'Immediate',salaryExpectation:'',currentSalary:'',currency:'AED',nationality:'',status:'Active',notes:'',consultant:'AK',createdAt:new Date().toISOString(),
+  // CV Profile fields
+  positionApplied:'',cvSummary:'',cvBody:''});
 const newFl=()=>({id:gid(),candidateId:'',candidateName:'',companyName:'',contactName:'',dateSent:realTod(),responseStatus:'No Response',notes:'',consultant:'AK'});
-const newCl=()=>({id:gid(),company:'',address:'',contactName:'',contactTitle:'',feeFirst:'',feeSubsequent:'',paymentTerms:'30 Days',contractDate:'',contractLink:'',roles:[],invoices:[],notes:'',createdAt:new Date().toISOString()});
+const newCl=()=>({id:gid(),company:'',address:'',contactName:'',contactEmail:'',contactTitle:'',feeFirst:'',feeSubsequent:'',paymentTerms:'30 Days',contractDate:'',contractLink:'',roles:[],invoices:[],notes:'',createdAt:new Date().toISOString()});
 const newRo=()=>({id:gid(),title:'',status:'Briefed',cvsSubmitted:0,notes:'',consultant:'',contactPerson:'',candidateName:'',salary:'',currency:'AED',placementFee:''});
 const newIn=()=>({id:gid(),invoiceNumber:'',roleTitle:'',candidateName:'',amount:'',currency:'AED',dateIssued:'',dateDue:'',datePaid:'',status:'Draft',link:'',items:[]});
 const newInvItem=()=>({id:gid(),desc:'',amount:''});
@@ -101,6 +104,15 @@ function loadImg(src){
     img.onerror=reject;
     img.src=src;
   });
+}
+
+// Opens a pre-filled Outlook Web compose window — no OAuth, no backend, works
+// with any Microsoft 365 login. Browsers can't attach files programmatically
+// (true for every provider, not an Outlook limitation), so for anything with
+// a PDF the caller downloads the file first and the draft just says to attach it.
+function openOutlookDraft(to,subject,body){
+  const url=`https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(to||'')}&subject=${encodeURIComponent(subject||'')}&body=${encodeURIComponent(body||'')}`;
+  window.open(url,'_blank');
 }
 
 // Builds and downloads an invoice PDF matching Stratium Partners' actual
@@ -209,6 +221,132 @@ async function downloadInvoicePDF(client, inv){
   doc.text(COMPANY.addr2,547,bandY+31,{align:'right'});
 
   doc.save(`Invoice_${(inv.invoiceNumber||'draft').replace(/[^\w-]/g,'_')}.pdf`);
+}
+
+// Parses a plain-text pasted CV body into simple blocks the renderer can lay
+// out: section bars (a line like "EXPERIENCE:"), bullets ("• ..." / "- ..."),
+// blank-line spacers, and plain paragraph lines. Deliberately simple and
+// predictable rather than guessing at bold/company-name styling — AK
+// controls exactly what's redacted by what he pastes into the body.
+function parseCvBody(text){
+  const SECTIONS=/^(SUMMARY|EXPERIENCE|EDUCATION|CERTIFICATIONS|SKILLS)\s*:?\s*$/i;
+  return (text||'').split('\n').map(raw=>{
+    const line=raw.trim();
+    if(!line)return {type:'space'};
+    if(SECTIONS.test(line))return {type:'section',text:line.replace(/:?\s*$/,'').toUpperCase()+':'};
+    if(/^[•\-*]\s+/.test(line))return {type:'bullet',text:line.replace(/^[•\-*]\s+/,'')};
+    return {type:'para',text:line};
+  });
+}
+
+// Renders a Candidate Profile PDF matching the Stratium template: dark cover
+// page (logo, position/nationality/notice fields, consultant contact,
+// summary bullets), then white body pages with a repeated small header and
+// black/mauve section bars for whatever the pasted CV body contains.
+// confidential=true blanks the candidate name on the cover and every page header.
+async function downloadCandidateProfilePDF(candidate, confidential){
+  const doc=new jsPDF({unit:'pt',format:'a4'});
+  const ac=[196,133,122];
+  const coverBg=[17,19,24];
+  const white=[245,240,235];
+  const grayLight=[200,192,184];
+  const dark=[30,30,34];
+  const gray=[110,110,116];
+  const W=595,H=842;
+  const displayName=confidential?'Confidential':(candidate.name||'Confidential');
+
+  // ---- Cover page ----
+  doc.setFillColor(...coverBg);doc.rect(0,0,W,H,'F');
+  doc.setDrawColor(...ac);doc.setLineWidth(3);doc.rect(6,6,W-12,H-12);
+  doc.setLineWidth(1);
+
+  try{const img=await loadImg(logo);doc.addImage(img,'PNG',44,40,46,44);}catch{/* optional */}
+  doc.setFont('times','normal');doc.setFontSize(24);doc.setTextColor(...ac);
+  doc.text('Candidate Profile',W/2,68,{align:'center'});
+
+  let y=160;
+  const field=(label,val)=>{
+    doc.setFont('helvetica','normal');doc.setFontSize(11);doc.setTextColor(...white);
+    doc.text(`${label}: ${val||'—'}`,44,y);y+=27;
+  };
+  field('Candidate',displayName);
+  field('Position Applied',candidate.positionApplied||candidate.currentRole);
+  field('Nationality',candidate.nationality);
+  field('Notice Period',candidate.availability);
+  if(candidate.currentSalary)field('Current Salary',`${candidate.currency||'AED'} ${Number(candidate.currentSalary).toLocaleString()}`);
+  if(candidate.salaryExpectation)field('Expected Salary',`${candidate.currency||'AED'} ${Number(candidate.salaryExpectation).toLocaleString()}`);
+  field('Consultant Name',COMPANY.name);
+  field('Consultant Contact',COMPANY.phone);
+
+  y+=20;
+  doc.setFont('helvetica','bold');doc.setFontSize(11);doc.setTextColor(...white);
+  doc.text('Candidate Summary:',44,y);y+=22;
+  doc.setFont('helvetica','normal');doc.setFontSize(10.5);
+  const summaryLines=(candidate.cvSummary||'').split('\n').filter(l=>l.trim());
+  summaryLines.forEach(line=>{
+    const clean=line.replace(/^[•\-*]\s*/,'');
+    const wrapped=doc.splitTextToSize(`•  ${clean}`,W-100);
+    wrapped.forEach((w,i)=>{doc.text(i===0?w:`   ${w}`,44,y);y+=15;});
+    y+=4;
+  });
+
+  // ---- Body pages ----
+  const blocks=parseCvBody(candidate.cvBody);
+  const marginX=44,maxW=W-88;
+  let page=1;
+
+  const drawBodyHeader=()=>{
+    doc.setFillColor(255,255,255);doc.rect(0,0,W,H,'F');
+    if(logoImgCache){try{doc.addImage(logoImgCache,'PNG',44,32,26,25);}catch{/* skip */}}
+    doc.setFont('helvetica','normal');doc.setFontSize(10);doc.setTextColor(...gray);
+    doc.text(`Candidate Name: ${displayName}`,W/2,50,{align:'center'});
+    doc.setDrawColor(220,220,220);doc.line(44,64,W-44,64);
+    return 90;
+  };
+
+  let logoImgCache=null;
+  try{logoImgCache=await loadImg(logo);}catch{/* skip */}
+
+  doc.addPage();
+  y=drawBodyHeader();
+
+  const ensureSpace=needed=>{
+    if(y+needed>H-50){doc.addPage();y=drawBodyHeader();}
+  };
+
+  blocks.forEach(b=>{
+    if(b.type==='space'){y+=8;return;}
+    if(b.type==='section'){
+      ensureSpace(30);
+      y+=6;
+      doc.setFillColor(20,20,20);doc.rect(marginX,y,maxW,20,'F');
+      doc.setFillColor(...ac);doc.rect(marginX,y,4,20,'F');
+      doc.setFont('helvetica','bold');doc.setFontSize(10.5);doc.setTextColor(255,255,255);
+      doc.text(b.text,marginX+12,y+14);
+      y+=32;
+      return;
+    }
+    if(b.type==='bullet'){
+      doc.setFont('helvetica','normal');doc.setFontSize(10.5);doc.setTextColor(...dark);
+      const wrapped=doc.splitTextToSize(b.text,maxW-18);
+      ensureSpace(wrapped.length*14+4);
+      wrapped.forEach((w,i)=>{
+        doc.text(i===0?'•':' ',marginX+2,y);
+        doc.text(w,marginX+16,y);
+        y+=14;
+      });
+      y+=4;
+      return;
+    }
+    // plain paragraph line
+    doc.setFont('helvetica','normal');doc.setFontSize(10.5);doc.setTextColor(...dark);
+    const wrapped=doc.splitTextToSize(b.text,maxW);
+    ensureSpace(wrapped.length*14+6);
+    wrapped.forEach(w=>{doc.text(w,marginX,y);y+=14;});
+    y+=6;
+  });
+
+  doc.save(`${confidential?'Confidential_':''}Profile_${(candidate.name||'candidate').replace(/[^\w-]/g,'_')}.pdf`);
 }
 
 const newAc=()=>({id:gid(),date:realTod(),type:'Call',contact:'',company:'',outcome:'',nextSteps:'',consultant:'AK'});
@@ -321,6 +459,8 @@ export default function App(){
   const[csrch,setCsrch]=useState('');const[cstg,setCstg]=useState('All');const[cind,setCind]=useState('All');
   const[gq,setGq]=useState('');const[gOpen,setGOpen]=useState(false);
   const[pView,setPView]=useState('board');
+  const[colCollapsed,setColCollapsed]=useState({});
+  const[colShowCount,setColShowCount]=useState({});
   const[dragId,setDragId]=useState(null);
   const[asrch,setAsrch]=useState('');const[ast,setAst]=useState('All');
   const[fsrch,setFsrch]=useState('');const[fst,setFst]=useState('All');
@@ -503,6 +643,29 @@ export default function App(){
   };
   const updInv=(iid,fld,val)=>setClF(f=>({...f,invoices:(f.invoices||[]).map(i=>i.id===iid?{...i,[fld]:val}:i)}));
   const delInv=iid=>setClF(f=>({...f,invoices:(f.invoices||[]).filter(i=>i.id!==iid)}));
+
+  // Downloads the invoice PDF and opens a pre-filled Outlook draft in the
+  // same click — the PDF isn't auto-attached (browsers block that), so the
+  // draft body says to attach it and it's sitting right in Downloads.
+  const emailInvoice=(client,inv)=>{
+    downloadInvoicePDF(client,inv);
+    const subject=`Invoice ${inv.invoiceNumber||''} — Stratium Partners`;
+    const body=`Hi ${client.contactName||''},\n\nPlease find attached Invoice ${inv.invoiceNumber||''}${inv.roleTitle?` for ${inv.roleTitle}`:''}.\n\nPayment terms: ${client.paymentTerms||'30 Days'} from the invoice date. Bank details are on the invoice.\n\nLet me know if you have any questions.\n\nBest regards,\n${COMPANY.name}\n${COMPANY.firm}`;
+    openOutlookDraft(client.contactEmail,subject,body);
+    toast$(client.contactEmail?'✓ PDF downloaded — attach it to the Outlook draft that just opened':'⚠ No contact email on file for this client — add one, or paste the recipient manually in Outlook');
+  };
+
+  // Opens an Outlook draft to the matched Pipeline contact with the
+  // candidate's profile summary already written in — no attachment needed.
+  const emailFloat=fl=>{
+    const matched=matchContact(fl);
+    const to=matched?.email||'';
+    const subject=`${fl.candidateName||'Candidate'} — Profile for ${fl.companyName||'your team'}`;
+    const body=`Hi ${fl.contactName||matched?.name||''},\n\nI wanted to introduce ${fl.candidateName||'a candidate'} for a potential fit at ${fl.companyName||''}.\n\n${fl.notes||''}\n\nHappy to share the full CV/profile if this looks like a fit — let me know your thoughts.\n\nBest regards,\n${COMPANY.name}\n${COMPANY.firm}`;
+    openOutlookDraft(to,subject,body);
+    if(!to)toast$('⚠ No contact email matched — add one to the Pipeline contact, or paste it manually in Outlook');
+  };
+
   const addInvItem=invId=>setClF(f=>({...f,invoices:f.invoices.map(inv=>inv.id!==invId?inv:{...inv,items:[...(inv.items||[]),newInvItem()]})}));
   const updInvItem=(invId,itemId,field,val)=>setClF(f=>({...f,invoices:f.invoices.map(inv=>{
     if(inv.id!==invId)return inv;
@@ -723,17 +886,24 @@ export default function App(){
               <div style={{display:'flex',gap:12,overflowX:'auto',paddingBottom:8}}>
                 {STGS.map(stage=>{
                   const inStage=filtCo.filter(c=>c.stage===stage);
+                  // Any column over 100 starts collapsed by default — a pile that size is a
+                  // bulk list to search through, not something to scroll card-by-card.
+                  const collapsed=colCollapsed[stage]!==undefined?colCollapsed[stage]:inStage.length>100;
+                  const showCount=colShowCount[stage]||30;
+                  const visible=inStage.slice(0,showCount);
+                  const remaining=inStage.length-visible.length;
                   return <div key={stage}
                     onDragOver={e=>e.preventDefault()}
                     onDrop={e=>{e.preventDefault();if(dragId)updCo(dragId,'stage',stage);setDragId(null);}}
-                    style={{flexShrink:0,width:250,background:PANEL,borderRadius:10,border:`1px solid ${P.bo}`,display:'flex',flexDirection:'column',maxHeight:'calc(100vh - 260px)'}}>
-                    <div style={{padding:'10px 12px',borderBottom:`2px solid ${SC[stage]||P.bo}`,display:'flex',justifyContent:'space-between',alignItems:'center',flexShrink:0}}>
-                      <div style={{fontSize:12,fontWeight:700,color:P.tx}}>{stage}</div>
-                      <div style={{fontSize:11,color:P.ts,background:P.wh,borderRadius:99,padding:'1px 8px',border:`1px solid ${P.bo}`}}>{inStage.length}</div>
+                    style={{flexShrink:0,width:collapsed?44:250,background:PANEL,borderRadius:10,border:`1px solid ${P.bo}`,display:'flex',flexDirection:'column',maxHeight:'calc(100vh - 260px)',transition:'width 0.15s'}}>
+                    <div onClick={()=>setColCollapsed(c=>({...c,[stage]:!collapsed}))} style={{padding:'10px 12px',borderBottom:`2px solid ${SC[stage]||P.bo}`,display:'flex',justifyContent:'space-between',alignItems:'center',flexShrink:0,cursor:'pointer',writingMode:collapsed?'vertical-rl':'horizontal-tb'}}>
+                      <div style={{fontSize:12,fontWeight:700,color:P.tx,whiteSpace:'nowrap'}}>{stage}</div>
+                      {!collapsed&&<div style={{fontSize:11,color:P.ts,background:P.wh,borderRadius:99,padding:'1px 8px',border:`1px solid ${P.bo}`}}>{inStage.length}</div>}
                     </div>
-                    <div style={{padding:8,overflowY:'auto',flex:1}}>
+                    {!collapsed&&<div style={{padding:8,overflowY:'auto',flex:1}}>
                       {!inStage.length&&<div style={{fontSize:11,color:P.tm,textAlign:'center',padding:'16px 4px',fontStyle:'italic'}}>Empty</div>}
-                      {inStage.map(c=><div key={c.id}
+                      {inStage.length>50&&<div style={{fontSize:10,color:P.tm,padding:'2px 2px 8px',fontStyle:'italic'}}>Large list — use search above to jump straight to someone.</div>}
+                      {visible.map(c=><div key={c.id}
                         draggable
                         onDragStart={()=>setDragId(c.id)}
                         onClick={()=>setHistModal(c.id)}
@@ -745,9 +915,11 @@ export default function App(){
                         <div style={{display:'flex',gap:4,marginTop:8}}>
                           <button onClick={e=>{e.stopPropagation();setLgF({date:T,stage:c.stage,nextSteps:c.nextSteps||'',notes:'',consultant:'AK',nextFollowUp:c.nextFollowUp||''});setLgM(c);}} style={{...btsm(P.gn),padding:'2px 7px'}}>📞</button>
                           <button onClick={e=>{e.stopPropagation();setCoF({...c});setCoM('edit');}} style={{...btsm(),padding:'2px 7px'}}>Edit</button>
+                          {c.email&&<button onClick={e=>{e.stopPropagation();openOutlookDraft(c.email,'','');}} style={{...btsm(P.ac),padding:'2px 7px'}}>✉</button>}
                         </div>
                       </div>)}
-                    </div>
+                      {remaining>0&&<button onClick={()=>setColShowCount(c=>({...c,[stage]:showCount+30}))} style={{width:'100%',padding:'8px',borderRadius:7,border:`1px dashed ${P.bo}`,background:'transparent',color:P.ts,cursor:'pointer',fontSize:11,fontFamily:'inherit'}}>Show 30 more ({remaining} left)</button>}
+                    </div>}
                   </div>;
                 })}
               </div>
@@ -770,6 +942,7 @@ export default function App(){
                       <td style={{padding:'10px 14px',whiteSpace:'nowrap'}}>
                         <div style={{display:'flex',gap:4}}>
                           <button style={btsm(P.bl)} onClick={()=>setHistModal(c.id)} title="View conversation history">📋</button>
+                          {c.email&&<button style={btsm(P.ac)} onClick={()=>openOutlookDraft(c.email,'','')} title="Email via Outlook">✉</button>}
                           <button style={btsm(P.gn)} onClick={()=>{setLgF({date:T,stage:c.stage,nextSteps:c.nextSteps||'',notes:'',consultant:'AK',nextFollowUp:c.nextFollowUp||''});setLgM(c);}}>📞</button>
                           <button style={btsm()} onClick={()=>{setCoF({...c});setCoM('edit');}}>Edit</button>
                           <button style={btsm(P.rd)} onClick={()=>delOk(c.name,()=>{saveCo(contacts.filter(x=>x.id!==c.id));setConf(null);toast$('Deleted');})}>Del</button>
@@ -853,7 +1026,7 @@ export default function App(){
                     <td style={{padding:'10px 14px',color:P.ts}}>{f.dateSent}</td>
                     <td style={{padding:'10px 14px'}}><ISel value={f.responseStatus} opts={FSS} cm={FC} onSave={v=>updFl(f.id,'responseStatus',v)}/></td>
                     <td style={{padding:'10px 14px',maxWidth:180}}><ITx value={f.notes} onSave={v=>saveFl(floats.map(fl=>fl.id===f.id?{...fl,notes:v}:fl))} ph="Add note..."/></td>
-                    <td style={{padding:'10px 14px',whiteSpace:'nowrap'}}><div style={{display:'flex',gap:4}}><button style={btsm()} onClick={()=>{setFlF({...f});setFlM('edit');}}>Edit</button><button style={btsm(P.rd)} onClick={()=>delOk('this float',()=>{saveFl(floats.filter(x=>x.id!==f.id));setConf(null);toast$('Deleted');})}>Del</button></div></td>
+                    <td style={{padding:'10px 14px',whiteSpace:'nowrap'}}><div style={{display:'flex',gap:4}}><button style={btsm(P.ac)} onClick={()=>emailFloat(f)} title="Email via Outlook">✉</button><button style={btsm()} onClick={()=>{setFlF({...f});setFlM('edit');}}>Edit</button><button style={btsm(P.rd)} onClick={()=>delOk('this float',()=>{saveFl(floats.filter(x=>x.id!==f.id));setConf(null);toast$('Deleted');})}>Del</button></div></td>
                   </tr>)}
                 </tbody>
               </table>
@@ -983,7 +1156,7 @@ export default function App(){
                     <div style={{fontSize:11,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:6,display:'flex',justifyContent:'space-between'}}><span>Invoices ({(cl.invoices||[]).length})</span>{invT>0&&<span style={{color:P.ac}}>AED {(invP/1000).toFixed(0)}k / {(invT/1000).toFixed(0)}k cleared</span>}</div>
                     {(cl.invoices||[]).map(inv=><div key={inv.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 10px',background:PANEL,borderRadius:7,marginBottom:4,border:`1px solid ${['Written Off','Waived'].includes(inv.status)?`${P.rd}30`:P.bo}`}}>
                       <div><div style={{fontSize:11,fontWeight:600}}>{inv.invoiceNumber||'(No #)'}{inv.roleTitle?` · ${inv.roleTitle}`:''}</div><div style={{fontSize:10,color:P.ts}}>{inv.candidateName||'—'}{inv.dateDue?` · Due: ${inv.dateDue}`:''}</div></div>
-                      <div style={{display:'flex',gap:6,alignItems:'center'}}>{inv.amount&&<span style={{fontSize:12,fontWeight:700,color:P.ac}}>AED {Number(inv.amount).toLocaleString()}</span>}<Bge l={inv.status} c={IC[inv.status]||P.ts}/><button onClick={()=>downloadInvoicePDF(cl,inv)} title="Download PDF" style={{...btsm(P.bl),padding:'2px 7px'}}>PDF</button>{inv.link&&<a href={inv.link} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:P.bl}}>🔗</a>}</div>
+                      <div style={{display:'flex',gap:6,alignItems:'center'}}>{inv.amount&&<span style={{fontSize:12,fontWeight:700,color:P.ac}}>AED {Number(inv.amount).toLocaleString()}</span>}<Bge l={inv.status} c={IC[inv.status]||P.ts}/><button onClick={()=>downloadInvoicePDF(cl,inv)} title="Download PDF" style={{...btsm(P.bl),padding:'2px 7px'}}>PDF</button><button onClick={()=>emailInvoice(cl,inv)} title="Email via Outlook" style={{...btsm(P.ac),padding:'2px 7px'}}>✉</button>{inv.link&&<a href={inv.link} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:P.bl}}>🔗</a>}</div>
                     </div>)}
                   </div>}
                   {cl.notes&&<div style={{fontSize:12,color:P.ts,marginTop:10,padding:'8px 10px',background:PANEL,borderRadius:7,borderLeft:`3px solid ${P.bo}`}}>{cl.notes}</div>}
@@ -1030,7 +1203,7 @@ export default function App(){
         <div style={{display:'flex',gap:8,marginTop:20,justifyContent:'flex-end'}}><button style={bts()} onClick={()=>setCoM(null)}>Cancel</button><button style={btp()} onClick={saveCoF}>Save Contact</button></div>
       </Mod>}
 
-      {caM&&<Mod title={caM==='add'?'Add Candidate':'Edit Candidate'} onX={()=>setCaM(null)}>
+      {caM&&<Mod title={caM==='add'?'Add Candidate':'Edit Candidate'} onX={()=>setCaM(null)} wide={true}>
         <div style={G2}>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Name *</div><input value={caF.name||''} onChange={e=>setCaF(f=>({...f,name:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Current Role</div><input value={caF.currentRole||''} onChange={e=>setCaF(f=>({...f,currentRole:e.target.value}))} style={INP}/></div>
@@ -1038,11 +1211,45 @@ export default function App(){
           <div><div style={LB_S}>Nationality</div><input value={caF.nationality||''} onChange={e=>setCaF(f=>({...f,nationality:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Availability</div><input value={caF.availability||''} onChange={e=>setCaF(f=>({...f,availability:e.target.value}))} placeholder="e.g. Immediate, 1 month" style={INP}/></div>
           <div><div style={LB_S}>Currency</div><select value={caF.currency||'AED'} onChange={e=>setCaF(f=>({...f,currency:e.target.value}))} style={INP}>{CURR.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><div style={LB_S}>Current Salary (monthly)</div><input value={caF.currentSalary||''} onChange={e=>setCaF(f=>({...f,currentSalary:e.target.value}))} type="number" min="0" style={INP}/></div>
           <div><div style={LB_S}>Salary Exp. (monthly)</div><input value={caF.salaryExpectation||''} onChange={e=>setCaF(f=>({...f,salaryExpectation:e.target.value}))} type="number" min="0" style={INP}/></div>
           <div><div style={LB_S}>Status</div><select value={caF.status||'Active'} onChange={e=>setCaF(f=>({...f,status:e.target.value}))} style={INP}>{CSS2.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
           <div><div style={LB_S}>Consultant</div><select value={caF.consultant||'AK'} onChange={e=>setCaF(f=>({...f,consultant:e.target.value}))} style={INP}>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Notes</div><textarea value={caF.notes||''} onChange={e=>setCaF(f=>({...f,notes:e.target.value}))} rows={3} style={INP_TA}/></div>
         </div>
+
+        <div style={{borderTop:`1px solid ${P.bo}`,marginTop:18,paddingTop:16}}>
+          <div style={{fontSize:13,fontWeight:700,marginBottom:10,fontFamily:SERIF,color:P.ac}}>CV Profile</div>
+          <div style={G2}>
+            <div><div style={LB_S}>Position Applied</div><input value={caF.positionApplied||''} onChange={e=>setCaF(f=>({...f,positionApplied:e.target.value}))} placeholder="Defaults to Current Role if blank" style={INP}/></div>
+            <div>
+              <div style={LB_S}>Upload Original CV <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(.docx — extracts text below)</span></div>
+              <input type="file" accept=".docx" onChange={async e=>{
+                const file=e.target.files[0];if(!file)return;
+                try{
+                  const buf=await file.arrayBuffer();
+                  const result=await mammoth.extractRawText({arrayBuffer:buf});
+                  setCaF(f=>({...f,cvBody:result.value}));
+                  toast$('✓ CV text extracted — review and redact below before generating');
+                }catch(err){console.error(err);toast$('⚠ Could not read that file — try pasting the text directly','err');}
+                e.target.value='';
+              }} style={{...INP,padding:'6px 8px'}}/>
+            </div>
+          </div>
+          <div style={{marginTop:10}}>
+            <div style={LB_S}>Candidate Summary <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(one bullet per line — shown on the cover page)</span></div>
+            <textarea value={caF.cvSummary||''} onChange={e=>setCaF(f=>({...f,cvSummary:e.target.value}))} rows={4} placeholder={"20+ years of experience in...\nFormer Chief of Staff to COO at..."} style={INP_TA}/>
+          </div>
+          <div style={{marginTop:10}}>
+            <div style={LB_S}>CV Body <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(paste the CV content — type SUMMARY:, EXPERIENCE:, EDUCATION:, CERTIFICATIONS:, SKILLS: on their own line for section headers, and start lines with • for bullets. For the Confidential version, redact company/university names here yourself before downloading.)</span></div>
+            <textarea value={caF.cvBody||''} onChange={e=>setCaF(f=>({...f,cvBody:e.target.value}))} rows={10} style={{...INP_TA,fontFamily:'monospace',fontSize:11.5}}/>
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:10}}>
+            <button onClick={()=>downloadCandidateProfilePDF(caF,true)} style={{...btp(P.tx),color:P.bg}}>Download Confidential PDF</button>
+            <button onClick={()=>downloadCandidateProfilePDF(caF,false)} style={btp()}>Download Formatted PDF</button>
+          </div>
+        </div>
+
         <div style={{display:'flex',gap:8,marginTop:20,justifyContent:'flex-end'}}><button style={bts()} onClick={()=>setCaM(null)}>Cancel</button><button style={btp()} onClick={saveCaF}>Save Candidate</button></div>
       </Mod>}
 
@@ -1086,6 +1293,7 @@ export default function App(){
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Company *</div><input value={clF.company||''} onChange={e=>setClF(f=>({...f,company:e.target.value}))} style={INP}/></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Billing Address <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(one line per address line — used on invoices)</span></div><textarea value={clF.address||''} onChange={e=>setClF(f=>({...f,address:e.target.value}))} rows={3} placeholder={"302, 3rd Floor, Galleries 2\nDowntown Jebal Ali\nDubai, UAE"} style={INP_TA}/></div>
           <div><div style={LB_S}>Primary Contact</div><input value={clF.contactName||''} onChange={e=>setClF(f=>({...f,contactName:e.target.value}))} style={INP}/></div>
+          <div><div style={LB_S}>Contact Email <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(used for Email buttons)</span></div><input type="email" value={clF.contactEmail||''} onChange={e=>setClF(f=>({...f,contactEmail:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Contact Title</div><input value={clF.contactTitle||''} onChange={e=>setClF(f=>({...f,contactTitle:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Fee % — First Role</div><input value={clF.feeFirst||''} onChange={e=>setClF(f=>({...f,feeFirst:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Fee % — Subsequent</div><input value={clF.feeSubsequent||''} onChange={e=>setClF(f=>({...f,feeSubsequent:e.target.value}))} style={INP}/></div>
@@ -1115,10 +1323,11 @@ export default function App(){
         </div>)}
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,marginTop:16}}><div style={{fontSize:12,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px'}}>Invoices ({(clF.invoices||[]).length})</div><button style={{...bts(),padding:'4px 12px',fontSize:11}} onClick={addInv}>+ Add Invoice</button></div>
         {(clF.invoices||[]).map(inv=><div key={inv.id} style={{padding:12,background:PANEL,borderRadius:8,marginBottom:8,border:`1px solid ${P.bo}`}}>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto auto',gap:8,marginBottom:8,alignItems:'end'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto auto auto',gap:8,marginBottom:8,alignItems:'end'}}>
             <div><div style={LB_S}>Invoice #</div><input value={inv.invoiceNumber||''} onChange={e=>updInv(inv.id,'invoiceNumber',e.target.value)} style={INP}/></div>
             <div><div style={LB_S}>Status</div><select value={inv.status||'Draft'} onChange={e=>updInv(inv.id,'status',e.target.value)} style={INP}>{INS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
             <button onClick={()=>downloadInvoicePDF(clF,inv)} style={{marginBottom:1,padding:'9px 12px',borderRadius:6,border:`1px solid ${P.bl}30`,background:`${P.bl}08`,color:P.bl,cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600}}>PDF</button>
+            <button onClick={()=>emailInvoice(clF,inv)} style={{marginBottom:1,padding:'9px 12px',borderRadius:6,border:`1px solid ${P.ac}30`,background:`${P.ac}08`,color:P.ac,cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600}}>Email</button>
             <button onClick={()=>delInv(inv.id)} style={{marginBottom:1,padding:'9px 10px',borderRadius:6,border:`1px solid ${P.rd}30`,background:`${P.rd}08`,color:P.rd,cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>✕</button>
           </div>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
