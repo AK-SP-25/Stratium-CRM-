@@ -1,10 +1,26 @@
 import { useState, useEffect, useRef } from "react";
 import { storage } from "./storage";
 import { fileStorage } from "./fileStorage";
-import { supabase } from "./supabaseClient";
+import { supabase, currentConsultantName } from "./supabaseClient";
 import { jsPDF } from "jspdf";
+import { Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType, BorderStyle, ShadingType, Header, PageBreak } from "docx";
 import mammoth from "mammoth";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import logo from "./assets/stratium-monogram.png";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+async function extractPdfText(arrayBuffer) {
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let text = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(it => it.str).join(' ') + '\n\n';
+  }
+  return text;
+}
 
 const K={co:'bd_crm_v2',cl:'st_clients_v1',ca:'st_candidates_v1',fl:'st_floats_v1',ac:'st_activity_v1',tg:'st_bd_targets_v1',dt:'st_date_override_v1',rl:'st_roles_v1'};
 const P={bg:'#111318',wh:'#1C1C24',bo:'rgba(196,133,122,0.15)',ac:'#C4857A',tx:'#F5F0EB',ts:'#C8C0B8',tm:'#A09888',gn:'#10B981',bl:'#3B82F6',am:'#F59E0B',rd:'#EF4444',pu:'#8B5CF6',or:'#F97316',gy:'#94A3B8',vi:'#6366F1'};
@@ -20,7 +36,8 @@ const CC={'Active':P.gn,'Placed':P.vi,'On Hold':P.am,'Closed':P.gy};
 const ATS=['Call','Meeting','Float Email','New Lead','Client Signed'];
 const ACL={'Call':P.bl,'Meeting':P.pu,'Float Email':P.or,'New Lead':P.gn,'Client Signed':P.ac};
 // Consultant list kept as-is for when a second consultant joins again — currently solo-operated by AK.
-const CONS=['AK','Tehniyat'];
+// Consultants are now derived from whoever is logged in and what they've
+// logged (see knownConsultants / currentConsultantName) — no fixed list.
 const CURR=['AED','USD','GBP','EUR','SAR'];
 const RS=['Briefed','Shortlisting','CVs Submitted','Interviewing','Offer Stage','Placed','On Hold','Lost','Cancelled'];
 const RC={'Briefed':P.gy,'Shortlisting':P.bl,'CVs Submitted':P.pu,'Interviewing':P.am,'Offer Stage':P.or,'Placed':P.gn,'On Hold':P.tm,'Lost':P.rd,'Cancelled':P.tm};
@@ -29,7 +46,7 @@ const SUBS=['Submitted','Pending Feedback','Interview 1','Interview 2','Intervie
 const SUBC={'Submitted':P.bl,'Pending Feedback':P.gy,'Interview 1':P.am,'Interview 2':P.am,'Interview 3':P.am,'Negotiating Offer':P.or,'Offer Signed':P.pu,'Expected Start Date':P.vi,'Placed/Started':P.gn,'Rejected':P.rd};
 const INS=['Draft','Sent','Paid','Overdue','Pending Clearance','Cleared','Written Off','Waived'];
 const IC={'Draft':P.tm,'Sent':P.bl,'Paid':P.gn,'Overdue':P.rd,'Pending Clearance':P.or,'Cleared':P.gn,'Written Off':P.rd,'Waived':P.gy};
-const NAV=[{id:'dash',l:'Dashboard',e:'⊞'},{id:'contacts',l:'Pipeline',e:'⊕'},{id:'cands',l:'Candidates',e:'◎'},{id:'roles',l:'Roles',e:'▣'},{id:'floats',l:'Floats',e:'◉'},{id:'activity',l:'BD Activity',e:'◈'},{id:'meets',l:'Meetings',e:'◆'},{id:'clients',l:'Clients',e:'⊗'}];
+const NAV=[{id:'dash',l:'Dashboard',e:'⊞'},{id:'contacts',l:'Pipeline',e:'⊕'},{id:'cands',l:'Candidates',e:'◎'},{id:'roles',l:'Roles',e:'▣'},{id:'floats',l:'Floats',e:'◉'},{id:'activity',l:'BD Activity',e:'◈'},{id:'clients',l:'Clients',e:'⊗'}];
 const STAGE_ORDER={Cold:0,Contacted:1,Warm:2,'Proposal Sent':3,Negotiating:4,'Closed Won':5,'Closed Lost':6,'On Hold':7};
 const FLOAT_TO_STAGE={'Interested':'Warm','Interview Scheduled':'Proposal Sent'};
 
@@ -71,17 +88,32 @@ const migC=c=>{
   };
 };
 const newCo=()=>({id:gid(),name:'',title:'',company:'',industry:'',phone:'',phone2:'',email:'',stage:'Cold',lastContact:'',nextFollowUp:'',notes:'',nextSteps:'',callLog:[],createdAt:new Date().toISOString()});
-const newCa=()=>({id:gid(),name:'',currentRole:'',currentCompany:'',availability:'Immediate',salaryExpectation:'',currentSalary:'',currency:'AED',nationality:'',status:'Active',notes:'',consultant:'AK',createdAt:new Date().toISOString(),
+const newCa=()=>({id:gid(),name:'',currentRole:'',currentCompany:'',availability:'Immediate',salaryExpectation:'',currentSalary:'',currency:'AED',nationality:'',status:'Active',notes:'',consultant:'',createdAt:new Date().toISOString(),
   // CV Profile fields
-  positionApplied:'',cvSummary:'',cvBody:'',
+  positionApplied:'',cvSummary:'',
+  // Structured, per-section content — guarantees each line lands under the
+  // right header instead of relying on inline markers in one big blob.
+  cvSections:{summary:'',experience:'',education:'',certifications:'',skills:''},
+  cvInclude:{summary:true,experience:true,education:true,certifications:true,skills:true},
   // CV Files — Supabase Storage paths, not the binary itself. originalCv is
   // {name,path,uploadedAt}|null; formattedCvs is a list of the same shape.
   originalCv:null,formattedCvs:[]});
 const newFl=()=>({id:gid(),candidateId:'',candidateName:'',companyName:'',contactName:'',dateSent:realTod(),responseStatus:'No Response',notes:'',consultant:'AK'});
-const newCl=()=>({id:gid(),company:'',address:'',contactName:'',contactEmail:'',contactTitle:'',feeFirst:'',feeSubsequent:'',paymentTerms:'30 Days',contractDate:'',contractLink:'',invoices:[],notes:'',createdAt:new Date().toISOString()});
-const newRole=()=>({id:gid(),clientId:'',title:'',status:'Briefed',salary:'',currency:'AED',placementFee:'',consultant:'AK',contactPerson:'',dateOpened:realTod(),notes:'',submissions:[],createdAt:new Date().toISOString()});
+const newCl=()=>({id:gid(),company:'',address:'',contactName:'',contactEmail:'',contactTitle:'',feeFirst:'',feeSubsequent:'',paymentTerms:'30 Days',contractDate:'',contractFile:null,invoices:[],notes:'',createdAt:new Date().toISOString()});
+const newRole=()=>({id:gid(),clientId:'',title:'',status:'Briefed',salary:'',currency:'AED',placementFee:'',consultant:'',contactPerson:'',dateOpened:realTod(),notes:'',submissions:[],createdAt:new Date().toISOString()});
 const newSub=()=>({id:gid(),candidateId:'',candidateName:'',status:'Submitted',dateSubmitted:realTod(),feedback:'',expectedStartDate:''});
 const newIn=()=>({id:gid(),invoiceNumber:'',roleTitle:'',candidateName:'',amount:'',currency:'AED',dateIssued:'',dateDue:'',datePaid:'',status:'Draft',link:'',items:[]});
+
+// Fills in the newer CV Profile fields for candidates saved before this
+// structure existed, and migrates any old flat cvBody text into the
+// Experience section as a starting point (nothing is silently dropped).
+function migCa(c){
+  const base={originalCv:null,formattedCvs:[],cvSections:{summary:'',experience:'',education:'',certifications:'',skills:''},cvInclude:{summary:true,experience:true,education:true,certifications:true,skills:true},...c};
+  if(c.cvBody&&!(base.cvSections.experience||base.cvSections.summary)){
+    base.cvSections={...base.cvSections,experience:c.cvBody};
+  }
+  return base;
+}
 const newInvItem=()=>({id:gid(),desc:'',amount:''});
 
 // Fixed letterhead details — same on every invoice. Edit here if any of
@@ -137,14 +169,14 @@ async function downloadInvoicePDF(client, inv){
 
   try{
     const img=await loadImg(logo);
-    doc.addImage(img,'PNG',497,y,50,48);
+    doc.addImage(img,'PNG',497,y,44,42);
   }catch{/* logo optional — invoice still generates without it */}
   doc.setFont('times','bold');doc.setFontSize(13);doc.setTextColor(...dark);
-  doc.text('STRATIUM PARTNERS',547,y+62,{align:'right'});
+  doc.text('STRATIUM PARTNERS',547,y+56,{align:'right'});
   doc.setFont('helvetica','normal');doc.setFontSize(6.5);doc.setTextColor(...ac);
-  doc.text('YOUR STRATEGIC EDGE',547,y+72,{align:'right',charSpace:1});
+  doc.text('YOUR STRATEGIC EDGE',547,y+66,{align:'right',charSpace:1});
 
-  y=96;
+  y=130;
   doc.setFont('helvetica','bold');doc.setFontSize(11);doc.setTextColor(...dark);
   doc.text(`INVOICE: ${inv.invoiceNumber||'—'}`,48,y);
   doc.setFont('helvetica','normal');
@@ -231,140 +263,111 @@ async function downloadInvoicePDF(client, inv){
   doc.save(`Invoice_${(inv.invoiceNumber||'draft').replace(/[^\w-]/g,'_')}.pdf`);
 }
 
-// Parses a plain-text pasted CV body into simple blocks the renderer can lay
-// out: section bars (a line like "EXPERIENCE:"), bullets ("• ..." / "- ..."),
-// blank-line spacers, and plain paragraph lines. Deliberately simple and
-// predictable rather than guessing at bold/company-name styling — AK
-// controls exactly what's redacted by what he pastes into the body.
-function parseCvBody(text){
-  const SECTIONS=/^(SUMMARY|EXPERIENCE|EDUCATION|CERTIFICATIONS|SKILLS)\s*:?\s*$/i;
+// Fetches a bundled image asset as an ArrayBuffer — what docx's ImageRun
+// needs (unlike jsPDF, which could use an <img> element directly).
+async function loadImageBuffer(src){
+  const res=await fetch(src);
+  return await res.arrayBuffer();
+}
+
+const CV_SECTION_ORDER=[
+  ['summary','SUMMARY'],
+  ['experience','EXPERIENCE'],
+  ['education','EDUCATION'],
+  ['certifications','CERTIFICATIONS'],
+  ['skills','SKILLS'],
+];
+
+// Turns one section's plain-text content into docx Paragraphs — bullet
+// lines (starting with • / - / *) become real bullets, blank lines become
+// spacing, everything else is a plain paragraph. Predictable and safe
+// rather than guessing at bold/company-name styling from the raw text.
+function cvSectionParagraphs(text){
   return (text||'').split('\n').map(raw=>{
     const line=raw.trim();
-    if(!line)return {type:'space'};
-    if(SECTIONS.test(line))return {type:'section',text:line.replace(/:?\s*$/,'').toUpperCase()+':'};
-    if(/^[•\-*]\s+/.test(line))return {type:'bullet',text:line.replace(/^[•\-*]\s+/,'')};
-    return {type:'para',text:line};
+    if(!line)return new Paragraph({spacing:{after:80}});
+    if(/^[•\-*]\s+/.test(line)){
+      return new Paragraph({bullet:{level:0},spacing:{after:60},children:[new TextRun({text:line.replace(/^[•\-*]\s+/,''),size:21})]});
+    }
+    return new Paragraph({spacing:{after:100},children:[new TextRun({text:line,size:21})]});
   });
 }
 
-// Renders a Candidate Profile PDF matching the Stratium template: dark cover
-// page (logo, position/nationality/notice fields, consultant contact,
-// summary bullets), then white body pages with a repeated small header and
-// black/mauve section bars for whatever the pasted CV body contains.
-// confidential=true blanks the candidate name on the cover and every page header.
-async function buildCandidateProfileDoc(candidate, confidential){
-  const doc=new jsPDF({unit:'pt',format:'a4'});
-  const ac=[196,133,122];
-  const coverBg=[17,19,24];
-  const white=[245,240,235];
-  const grayLight=[200,192,184];
-  const dark=[30,30,34];
-  const gray=[110,110,116];
-  const W=595,H=842;
+// Builds the Candidate Profile as an editable Word document — matching the
+// Stratium cover-page + section-bar look as closely as Word's model allows,
+// but fully editable so it can be checked and converted to PDF by hand.
+// confidential=true blanks the candidate name on the cover and header.
+async function buildCandidateProfileDocx(candidate,confidential){
+  const ACCENT='C4857A',DARKBG='111318',WHITE='F5F0EB';
   const displayName=confidential?'Confidential':(candidate.name||'Confidential');
 
-  // ---- Cover page ----
-  doc.setFillColor(...coverBg);doc.rect(0,0,W,H,'F');
-  doc.setDrawColor(...ac);doc.setLineWidth(3);doc.rect(6,6,W-12,H-12);
-  doc.setLineWidth(1);
+  let logoBuf=null;
+  try{logoBuf=await loadImageBuffer(logo);}catch{/* optional */}
 
-  try{const img=await loadImg(logo);doc.addImage(img,'PNG',44,40,46,44);}catch{/* optional */}
-  doc.setFont('times','normal');doc.setFontSize(24);doc.setTextColor(...ac);
-  doc.text('Candidate Profile',W/2,68,{align:'center'});
+  // Word/LibreOffice don't reliably print/export a whole-page background
+  // color (it's treated as a screen-only "page color" in many setups), so
+  // instead of relying on that, every cover paragraph gets its own solid
+  // dark shading — the same technique used for the section bars below,
+  // which is fully reliable — stacked with no gaps for a seamless block.
+  const darkFill={type:ShadingType.SOLID,color:DARKBG,fill:DARKBG};
+  const coverChildren=[];
+  if(logoBuf)coverChildren.push(new Paragraph({shading:darkFill,spacing:{before:120,after:120},children:[new ImageRun({data:logoBuf,transformation:{width:44,height:42}})]}));
+  coverChildren.push(new Paragraph({shading:darkFill,alignment:AlignmentType.LEFT,spacing:{after:360},children:[new TextRun({text:'Candidate Profile',size:40,color:ACCENT,font:'Cormorant Garamond'})]}));
 
-  let y=160;
-  const field=(label,val)=>{
-    doc.setFont('helvetica','normal');doc.setFontSize(11);doc.setTextColor(...white);
-    doc.text(`${label}: ${val||'—'}`,44,y);y+=27;
-  };
-  field('Candidate',displayName);
-  field('Position Applied',candidate.positionApplied||candidate.currentRole);
-  field('Nationality',candidate.nationality);
-  field('Notice Period',candidate.availability);
-  if(candidate.currentSalary)field('Current Salary',`${candidate.currency||'AED'} ${Number(candidate.currentSalary).toLocaleString()}`);
-  if(candidate.salaryExpectation)field('Expected Salary',`${candidate.currency||'AED'} ${Number(candidate.salaryExpectation).toLocaleString()}`);
-  field('Consultant Name',COMPANY.name);
-  field('Consultant Contact',COMPANY.phone);
+  const field=(label,val)=>new Paragraph({shading:darkFill,spacing:{after:160},children:[new TextRun({text:`${label}: `,bold:true,size:22,color:WHITE}),new TextRun({text:val||'—',size:22,color:WHITE})]});
+  coverChildren.push(field('Candidate',displayName));
+  coverChildren.push(field('Position Applied',candidate.positionApplied||candidate.currentRole));
+  coverChildren.push(field('Nationality',candidate.nationality));
+  coverChildren.push(field('Notice Period',candidate.availability));
+  if(candidate.currentSalary)coverChildren.push(field('Current Salary',`${candidate.currency||'AED'} ${Number(candidate.currentSalary).toLocaleString()}`));
+  if(candidate.salaryExpectation)coverChildren.push(field('Expected Salary',`${candidate.currency||'AED'} ${Number(candidate.salaryExpectation).toLocaleString()}`));
+  coverChildren.push(field('Consultant Name',COMPANY.name));
+  coverChildren.push(field('Consultant Contact',COMPANY.phone));
 
-  y+=20;
-  doc.setFont('helvetica','bold');doc.setFontSize(11);doc.setTextColor(...white);
-  doc.text('Candidate Summary:',44,y);y+=22;
-  doc.setFont('helvetica','normal');doc.setFontSize(10.5);
+  coverChildren.push(new Paragraph({shading:darkFill,spacing:{before:200,after:120},children:[new TextRun({text:'Candidate Summary:',bold:true,size:22,color:WHITE})]}));
   const summaryLines=(candidate.cvSummary||'').split('\n').filter(l=>l.trim());
   summaryLines.forEach(line=>{
-    const clean=line.replace(/^[•\-*]\s*/,'');
-    const wrapped=doc.splitTextToSize(`•  ${clean}`,W-100);
-    wrapped.forEach((w,i)=>{doc.text(i===0?w:`   ${w}`,44,y);y+=15;});
-    y+=4;
+    coverChildren.push(new Paragraph({shading:darkFill,bullet:{level:0},spacing:{after:80},children:[new TextRun({text:line.replace(/^[•\-*]\s*/,''),size:21,color:WHITE})]}));
+  });
+  // Fill the rest of the cover page with dark, empty, spacing-only paragraphs
+  // so the dark block runs to the bottom of the page rather than stopping
+  // partway down with white beneath it.
+  for(let i=0;i<14;i++)coverChildren.push(new Paragraph({shading:darkFill,spacing:{after:200},children:[]}));
+  coverChildren.push(new Paragraph({children:[new PageBreak()]}));
+
+  const bodyChildren=[];
+  CV_SECTION_ORDER.forEach(([key,label])=>{
+    if(!candidate.cvInclude||candidate.cvInclude[key]===false)return;
+    const content=(candidate.cvSections||{})[key];
+    if(!content||!content.trim())return;
+    bodyChildren.push(new Paragraph({
+      spacing:{before:260,after:160},
+      shading:{type:ShadingType.SOLID,color:'141414',fill:'141414'},
+      border:{left:{style:BorderStyle.SINGLE,size:24,color:ACCENT}},
+      children:[new TextRun({text:`${label}:`,bold:true,size:21,color:'FFFFFF'})],
+    }));
+    bodyChildren.push(...cvSectionParagraphs(content));
+  });
+  if(!bodyChildren.length){
+    bodyChildren.push(new Paragraph({children:[new TextRun({text:'(No sections included — check the include toggles and section content.)',italics:true,size:21,color:'888888'})]}));
+  }
+
+  const headerRow=new Header({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:`Candidate Name: ${displayName}`,size:18,color:'6E6E74'})]})]});
+
+  const docObj=new Document({
+    sections:[
+      {properties:{page:{margin:{top:720,bottom:720,left:720,right:720}}},children:coverChildren},
+      {properties:{page:{margin:{top:900,bottom:900,left:720,right:720}}},headers:{default:headerRow},children:bodyChildren},
+    ],
   });
 
-  // ---- Body pages ----
-  const blocks=parseCvBody(candidate.cvBody);
-  const marginX=44,maxW=W-88;
-  let page=1;
-
-  const drawBodyHeader=()=>{
-    doc.setFillColor(255,255,255);doc.rect(0,0,W,H,'F');
-    if(logoImgCache){try{doc.addImage(logoImgCache,'PNG',44,32,26,25);}catch{/* skip */}}
-    doc.setFont('helvetica','normal');doc.setFontSize(10);doc.setTextColor(...gray);
-    doc.text(`Candidate Name: ${displayName}`,W/2,50,{align:'center'});
-    doc.setDrawColor(220,220,220);doc.line(44,64,W-44,64);
-    return 90;
-  };
-
-  let logoImgCache=null;
-  try{logoImgCache=await loadImg(logo);}catch{/* skip */}
-
-  doc.addPage();
-  y=drawBodyHeader();
-
-  const ensureSpace=needed=>{
-    if(y+needed>H-50){doc.addPage();y=drawBodyHeader();}
-  };
-
-  blocks.forEach(b=>{
-    if(b.type==='space'){y+=8;return;}
-    if(b.type==='section'){
-      ensureSpace(30);
-      y+=6;
-      doc.setFillColor(20,20,20);doc.rect(marginX,y,maxW,20,'F');
-      doc.setFillColor(...ac);doc.rect(marginX,y,4,20,'F');
-      doc.setFont('helvetica','bold');doc.setFontSize(10.5);doc.setTextColor(255,255,255);
-      doc.text(b.text,marginX+12,y+14);
-      y+=32;
-      return;
-    }
-    if(b.type==='bullet'){
-      doc.setFont('helvetica','normal');doc.setFontSize(10.5);doc.setTextColor(...dark);
-      const wrapped=doc.splitTextToSize(b.text,maxW-18);
-      ensureSpace(wrapped.length*14+4);
-      wrapped.forEach((w,i)=>{
-        doc.text(i===0?'•':' ',marginX+2,y);
-        doc.text(w,marginX+16,y);
-        y+=14;
-      });
-      y+=4;
-      return;
-    }
-    // plain paragraph line
-    doc.setFont('helvetica','normal');doc.setFontSize(10.5);doc.setTextColor(...dark);
-    const wrapped=doc.splitTextToSize(b.text,maxW);
-    ensureSpace(wrapped.length*14+6);
-    wrapped.forEach(w=>{doc.text(w,marginX,y);y+=14;});
-    y+=6;
-  });
-
-  return doc;
+  return await Packer.toBlob(docObj);
 }
 
 function candidateProfileFilename(candidate,confidential){
-  return `${confidential?'Confidential_':''}Profile_${(candidate.name||'candidate').replace(/[^\w-]/g,'_')}.pdf`;
+  return `${confidential?'Confidential_':''}Profile_${(candidate.name||'candidate').replace(/[^\w-]/g,'_')}.docx`;
 }
 
-async function downloadCandidateProfilePDF(candidate,confidential){
-  const doc=await buildCandidateProfileDoc(candidate,confidential);
-  doc.save(candidateProfileFilename(candidate,confidential));
-}
 
 const newAc=()=>({id:gid(),date:realTod(),type:'Call',contact:'',company:'',outcome:'',nextSteps:'',consultant:'AK'});
 
@@ -460,6 +463,7 @@ export default function App(){
   const[targets,setTargets]=useState({calls:20,floats:10,meetings:5,leads:5,revenue:50000});
   const[dateOverride,setDateOverride]=useState('');
   const[loaded,setLoaded]=useState(false);
+  const[me,setMe]=useState('');
   const[tab,setTab]=useState('dash');
   const[toast,setToast]=useState(null);
   const[mobile,setMobile]=useState(window.innerWidth<768);
@@ -487,10 +491,6 @@ export default function App(){
   const[fsrch,setFsrch]=useState('');const[fst,setFst]=useState('All');
   const[actW,setActW]=useState(()=>wkStart(realTod()));
   const[actT,setActT]=useState('All');const[actC,setActC]=useState('All');
-  const[mtT,setMtT]=useState('All');
-  const[meetRange,setMeetRange]=useState('month');
-  const[meetFrom,setMeetFrom]=useState(()=>addDays(realTod(),-30));
-  const[meetTo,setMeetTo]=useState(realTod);
   const[tgEdit,setTgEdit]=useState({calls:20,floats:10,meetings:5,leads:5,revenue:50000});
   const jsonRef=useRef();
 
@@ -523,7 +523,7 @@ export default function App(){
       toast$(`✓ Migrated ${migrated.length} role${migrated.length!==1?'s':''} from Clients into the new Roles tab`);
     }
     setClients(loadedClients);setRoles(loadedRoles);
-    setCands((await load(K.ca)).map(c=>({originalCv:null,formattedCvs:[],...c})));
+    setCands((await load(K.ca)).map(migCa));
     setFloats(loadedFloats);setActivity(loadedActivity);
     // Self-heal: if anything needed re-padding, write the corrected version straight back
     // so the fix persists and "This Month" etc. are correct from the very next load too.
@@ -531,6 +531,7 @@ export default function App(){
     if(clientsWithLegacyRoles.length){persist(K.cl,loadedClients);persist(K.rl,loadedRoles);}
     const tg=await load(K.tg,{calls:20,floats:10,meetings:5,leads:5,revenue:50000});setTargets({revenue:50000,...tg});setTgEdit({revenue:50000,...tg});
     const dt=await load(K.dt,'');setDateOverride(typeof dt==='string'?dt:'');
+    currentConsultantName().then(setMe);
     setLoaded(true);
   })();},[]);
 
@@ -581,14 +582,14 @@ export default function App(){
   const filtCa=cands.filter(c=>{const q=asrch.toLowerCase();const m=!q||[c.name,c.currentRole,c.currentCompany,c.nationality].some(f=>f&&f.toLowerCase().includes(q));return m&&(ast==='All'||c.status===ast);});
   const filtFl=floats.filter(f=>{const q=fsrch.toLowerCase();const m=!q||[f.candidateName,f.companyName,f.contactName].some(x=>x&&x.toLowerCase().includes(q));return m&&(fst==='All'||f.responseStatus===fst);}).sort((a,b)=>b.dateSent.localeCompare(a.dateSent));
   const filtAc=activity.filter(a=>(actT==='All'||a.type===actT)&&(actC==='All'||a.consultant===actC)&&a.date>=AWD[0]&&a.date<=AWD[6]).sort((a,b)=>b.date.localeCompare(a.date));
-  const meetLog=activity.filter(a=>['Call','Meeting'].includes(a.type)&&(mtT==='All'||a.type===mtT)).sort((a,b)=>b.date.localeCompare(a.date));
-  const filtMeet=meetLog.filter(a=>{
-    if(meetRange==='today')return a.date===T;
-    if(meetRange==='week')return a.date>=WD[0]&&a.date<=WD[6];
-    if(meetRange==='month')return a.date>=MS;
-    if(meetRange==='custom')return a.date>=meetFrom&&a.date<=meetTo;
-    return true;
-  });
+  // Team members are now whoever's actually logged something, not a fixed
+  // list — new logins show up here automatically the first time they save.
+  const knownConsultants=[...new Set([
+    ...activity.map(a=>a.consultant),
+    ...cands.map(c=>c.consultant),
+    ...floats.map(f=>f.consultant),
+    ...roles.map(r=>r.consultant),
+  ].filter(Boolean))].sort();
   const actCnt=type=>activity.filter(a=>a.type===type&&a.date>=AWD[0]&&a.date<=AWD[6]&&(actC==='All'||a.consultant===actC)).length;
 
   const updCo=(id,f,v)=>saveCo(contacts.map(c=>c.id===id?{...c,[f]:v}:c));
@@ -610,7 +611,7 @@ export default function App(){
     if(field!=='responseStatus')return;
     const fl=floats.find(f=>f.id===id);if(!fl)return;
     const isPos=['Interested','Interview Scheduled'].includes(val);
-    saveAc([{id:gid(),date:T,type:'Float Email',contact:fl.contactName||fl.companyName||'',company:fl.companyName||'',outcome:`Float response: ${val} — ${fl.candidateName}`,nextSteps:isPos?`Follow up — ${fl.companyName} is ${val.toLowerCase()}`:'',consultant:fl.consultant||'AK'},...activity]);
+    saveAc([{id:gid(),date:T,type:'Float Email',contact:fl.contactName||fl.companyName||'',company:fl.companyName||'',outcome:`Float response: ${val} — ${fl.candidateName}`,nextSteps:isPos?`Follow up — ${fl.companyName} is ${val.toLowerCase()}`:'',consultant:me},...activity]);
 
     let matched=matchContact(fl);
 
@@ -619,7 +620,7 @@ export default function App(){
     if(!matched&&isPos&&fl.companyName){
       const stage=FLOAT_TO_STAGE[val]||'Warm';
       const nextSteps=`Follow up — ${fl.companyName} is ${val.toLowerCase()}`;
-      const logEntry={id:gid(),date:T,stage,nextSteps,notes:`Float response — ${val}: ${fl.candidateName} floated to ${fl.companyName}`,consultant:fl.consultant||'AK'};
+      const logEntry={id:gid(),date:T,stage,nextSteps,notes:`Float response — ${val}: ${fl.candidateName} floated to ${fl.companyName}`,consultant:me};
       const created={...newCo(),name:fl.contactName||'(Contact TBC)',company:fl.companyName,stage,nextSteps,lastContact:T,callLog:[logEntry]};
       saveCo([created,...contacts]);
       toast$(`✓ New Pipeline contact created — ${created.name} · ${stage}`);
@@ -629,25 +630,25 @@ export default function App(){
     const targetStage=FLOAT_TO_STAGE[val];
     const upgrade=targetStage&&(STAGE_ORDER[targetStage]||0)>(STAGE_ORDER[matched.stage]||0);
     const newStage=upgrade?targetStage:matched.stage;
-    const logEntry={id:gid(),date:T,stage:newStage,nextSteps:isPos?`Follow up — ${fl.companyName} is ${val.toLowerCase()}`:'',notes:`Float response — ${val}: ${fl.candidateName} floated to ${fl.companyName}`,consultant:fl.consultant||'AK'};
+    const logEntry={id:gid(),date:T,stage:newStage,nextSteps:isPos?`Follow up — ${fl.companyName} is ${val.toLowerCase()}`:'',notes:`Float response — ${val}: ${fl.candidateName} floated to ${fl.companyName}`,consultant:me};
     const updatedLog=[logEntry,...(matched.callLog||[])].sort((a,b)=>b.date.localeCompare(a.date));
     saveCo(contacts.map(c=>c.id!==matched.id?c:{...c,stage:newStage,lastContact:T,nextSteps:isPos?(c.nextSteps||`Follow up — ${fl.companyName} is ${val.toLowerCase()}`):c.nextSteps,callLog:updatedLog}));
     toast$(`✓ ${matched.name}${upgrade?` → ${newStage}`:''}  · logged in Pipeline & Meetings`);
   };
 
   const saveCoF=()=>{if(!coF.name.trim()){toast$('Name required','err');return;}const u=coM==='add'?[{...coF,id:gid(),createdAt:new Date().toISOString()},...contacts]:contacts.map(c=>c.id===coF.id?coF:c);saveCo(u);setCoM(null);toast$(coM==='add'?'Contact added':'Contact updated');};
-  const saveCaF=()=>{if(!caF.name.trim()){toast$('Name required','err');return;}const u=caM==='add'?[{...caF,id:gid(),createdAt:new Date().toISOString()},...cands]:cands.map(c=>c.id===caF.id?caF:c);saveCa(u);setCaM(null);toast$(caM==='add'?'Candidate added':'Candidate updated');};
+  const saveCaF=()=>{if(!caF.name.trim()){toast$('Name required','err');return;}const u=caM==='add'?[{...caF,id:gid(),consultant:me,createdAt:new Date().toISOString()},...cands]:cands.map(c=>c.id===caF.id?caF:c);saveCa(u);setCaM(null);toast$(caM==='add'?'Candidate added':'Candidate updated');};
 
   const saveFlF=()=>{
     if(!flF.candidateName||!flF.companyName){toast$('Candidate and company required','err');return;}
-    const u=flM==='add'?[{...flF,id:gid()},...floats]:floats.map(f=>f.id===flF.id?flF:f);
+    const u=flM==='add'?[{...flF,id:gid(),consultant:me},...floats]:floats.map(f=>f.id===flF.id?flF:f);
     saveFl(u);setFlM(null);
     if(flM==='add'){
       // Every float logs to BD Activity, regardless of whether the company is in Pipeline yet.
-      saveAc([{id:gid(),date:flF.dateSent||T,type:'Float Email',contact:flF.contactName||flF.companyName||'',company:flF.companyName||'',outcome:`Float sent: ${flF.candidateName} to ${flF.companyName}`,nextSteps:'Await float response',consultant:flF.consultant||'AK'},...activity]);
+      saveAc([{id:gid(),date:flF.dateSent||T,type:'Float Email',contact:flF.contactName||flF.companyName||'',company:flF.companyName||'',outcome:`Float sent: ${flF.candidateName} to ${flF.companyName}`,nextSteps:'Await float response',consultant:me},...activity]);
       const matched=matchContact(flF);
       if(matched){
-        const logEntry={id:gid(),date:flF.dateSent||T,stage:matched.stage,nextSteps:'Await float response',notes:`Float sent: ${flF.candidateName} to ${flF.companyName}`,consultant:flF.consultant||'AK'};
+        const logEntry={id:gid(),date:flF.dateSent||T,stage:matched.stage,nextSteps:'Await float response',notes:`Float sent: ${flF.candidateName} to ${flF.companyName}`,consultant:me};
         const updatedLog=[logEntry,...(matched.callLog||[])].sort((a,b)=>b.date.localeCompare(a.date));
         saveCo(contacts.map(c=>c.id!==matched.id?c:{...c,lastContact:flF.dateSent||T,callLog:updatedLog}));
         toast$(`✓ Float sent · logged on ${matched.name} in Pipeline`);
@@ -655,14 +656,14 @@ export default function App(){
     }else{toast$('Float updated');}
   };
 
-  const saveAcF=()=>{saveAc([{...acF,id:gid()},...activity]);setAcF(newAc());setAcM(false);toast$('Activity logged');};
+  const saveAcF=()=>{saveAc([{...acF,id:gid(),consultant:me},...activity]);setAcF(newAc());setAcM(false);toast$('Activity logged');};
 
   const saveLog=()=>{
     if(!lgM)return;
-    const entry={id:gid(),date:lgF.date,stage:lgF.stage,nextSteps:lgF.nextSteps,notes:lgF.notes,consultant:lgF.consultant};
+    const entry={id:gid(),date:lgF.date,stage:lgF.stage,nextSteps:lgF.nextSteps,notes:lgF.notes,consultant:me};
     const updated=contacts.map(c=>{if(c.id!==lgM.id)return c;const nl=[entry,...(c.callLog||[])].sort((a,b)=>b.date.localeCompare(a.date));return{...c,stage:lgF.stage,nextSteps:lgF.nextSteps,nextFollowUp:lgF.nextFollowUp,lastContact:nl[0].date,callLog:nl};});
     saveCo(updated);
-    saveAc([{id:gid(),date:lgF.date,type:'Call',contact:lgM.name,company:lgM.company||'',outcome:lgF.notes||'',nextSteps:lgF.nextSteps||'',consultant:lgF.consultant},...activity]);
+    saveAc([{id:gid(),date:lgF.date,type:'Call',contact:lgM.name,company:lgM.company||'',outcome:lgF.notes||'',nextSteps:lgF.nextSteps||'',consultant:me},...activity]);
     setLgM(null);toast$('Call logged');
   };
 
@@ -673,15 +674,15 @@ export default function App(){
   // candidate record for next time — not just in your Downloads folder.
   const generateAndStoreCv=async confidential=>{
     try{
-      const doc=await buildCandidateProfileDoc(caF,confidential);
+      const blob=await buildCandidateProfileDocx(caF,confidential);
       const filename=candidateProfileFilename(caF,confidential);
-      doc.save(filename);
-      const blob=doc.output('blob');
-      const file=new File([blob],filename,{type:'application/pdf'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);
+      const file=new File([blob],filename,{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
       const path=await fileStorage.upload(caF.id,file);
       const entry={id:gid(),name:filename,path,type:confidential?'Confidential':'Formatted',uploadedAt:new Date().toISOString()};
       setCaF(f=>({...f,formattedCvs:[...(f.formattedCvs||[]),entry]}));
-      toast$('✓ PDF downloaded and saved to this candidate\'s CV files');
+      toast$('✓ Word doc downloaded and saved to this candidate\'s CV files');
     }catch(err){console.error(err);toast$('⚠ Could not save a copy to storage — the download still worked','err');}
   };
 
@@ -707,7 +708,7 @@ export default function App(){
   const saveRoleF=()=>{
     if(!roleF.clientId){toast$('Client required','err');return;}
     if(!roleF.title.trim()){toast$('Role title required','err');return;}
-    const u=roleM==='add'?[{...roleF,id:gid(),createdAt:new Date().toISOString()},...roles]:roles.map(r=>r.id===roleF.id?roleF:r);
+    const u=roleM==='add'?[{...roleF,id:gid(),consultant:me,createdAt:new Date().toISOString()},...roles]:roles.map(r=>r.id===roleF.id?roleF:r);
     saveRl(u);setRoleM(null);toast$(roleM==='add'?'Role added':'Role updated');
   };
   const addSubmission=candidateId=>{
@@ -771,17 +772,17 @@ export default function App(){
     return {...inv,items,amount:items.length?total:inv.amount};
   })}));
 
-  /* ── Consultant reassignment ── everything historical is folded onto AK,
-     since Stratium is currently a solo BD desk. The Consultant field/selector
-     stays in every form for when a second consultant is back on board. ── */
-  const reassignAllToAK=()=>{
-    const co2=contacts.map(c=>({...c,callLog:(c.callLog||[]).map(e=>({...e,consultant:'AK'}))}));
-    const ca2=cands.map(c=>({...c,consultant:'AK'}));
-    const fl2=floats.map(f=>({...f,consultant:'AK'}));
-    const ac2=activity.map(a=>({...a,consultant:'AK'}));
-    const rl2=roles.map(r=>({...r,consultant:r.consultant?'AK':r.consultant}));
+  /* ── Consultant reassignment ── a cleanup tool for folding stray/legacy
+     attribution onto whoever is currently logged in. Not needed day-to-day
+     now that every new record auto-attributes to whoever's signed in. ── */
+  const reassignAllToMe=()=>{
+    const co2=contacts.map(c=>({...c,callLog:(c.callLog||[]).map(e=>({...e,consultant:me}))}));
+    const ca2=cands.map(c=>({...c,consultant:me}));
+    const fl2=floats.map(f=>({...f,consultant:me}));
+    const ac2=activity.map(a=>({...a,consultant:me}));
+    const rl2=roles.map(r=>({...r,consultant:r.consultant?me:r.consultant}));
     saveCo(co2);saveCa(ca2);saveFl(fl2);saveAc(ac2);saveRl(rl2);
-    toast$('✓ All existing data reassigned to AK');
+    toast$(`✓ All existing data reassigned to ${me}`);
   };
 
   const dedupeActivity=()=>{
@@ -833,25 +834,25 @@ export default function App(){
         const d=JSON.parse(ev.target.result);
         // Every restored record — regardless of who it says logged it (e.g. "T") —
         // is force-attributed to AK, since Stratium is solo-operated now.
-        const rc=d.contacts?d.contacts.map(c=>({...migC(c),callLog:(migC(c).callLog||[]).map(en=>({...en,consultant:'AK'}))})):null;
+        const rc=d.contacts?d.contacts.map(c=>({...migC(c),callLog:(migC(c).callLog||[]).map(en=>({...en,consultant:me}))})):null;
         if(rc)saveCo(rc);
         if(d.clients){
           const restoredClients=d.clients.map(c=>({invoices:[],...c}));
           // Legacy backups may still have roles nested in each client — pull
           // those into the standalone Roles list instead of dropping them.
           const legacyRoles=d.clients.filter(c=>Array.isArray(c.roles)&&c.roles.length)
-            .flatMap(c=>c.roles.map(r=>({...newRole(),...r,clientId:c.id,consultant:'AK',
+            .flatMap(c=>c.roles.map(r=>({...newRole(),...r,clientId:c.id,consultant:me,
               submissions:r.candidateName?[{...newSub(),candidateName:r.candidateName,status:r.status==='Placed'?'Placed/Started':'Submitted'}]:[]})));
           saveCl(restoredClients.map(c=>{const{roles,...rest}=c;return rest;}));
-          if(d.roles||legacyRoles.length)saveRl([...(d.roles||[]).map(r=>({...r,consultant:'AK'})),...legacyRoles]);
+          if(d.roles||legacyRoles.length)saveRl([...(d.roles||[]).map(r=>({...r,consultant:me})),...legacyRoles]);
         }
-        if(d.candidates)saveCa(d.candidates.map(c=>({originalCv:null,formattedCvs:[],...c,consultant:'AK'})));
-        if(d.floats)saveFl(d.floats.map(f=>({...f,dateSent:normD(f.dateSent),consultant:'AK'})));
+        if(d.candidates)saveCa(d.candidates.map(c=>({...migCa(c),consultant:me})));
+        if(d.floats)saveFl(d.floats.map(f=>({...f,dateSent:normD(f.dateSent),consultant:me})));
         if(d.targets){saveTg(d.targets);setTgEdit({...d.targets});}
-        const callsFromLogs=(rc||[]).flatMap(c=>(c.callLog||[]).filter(en=>en&&en.date).map(en=>({id:en.id||gid(),date:normD(en.date),type:'Call',contact:c.name||'',company:c.company||'',outcome:en.notes||'',nextSteps:en.nextSteps||'',consultant:'AK'})));
-        const otherAc=(Array.isArray(d.activity)?d.activity:[]).filter(a=>a.type!=='Call').map(a=>({...a,date:normD(a.date),consultant:'AK'}));
+        const callsFromLogs=(rc||[]).flatMap(c=>(c.callLog||[]).filter(en=>en&&en.date).map(en=>({id:en.id||gid(),date:normD(en.date),type:'Call',contact:c.name||'',company:c.company||'',outcome:en.notes||'',nextSteps:en.nextSteps||'',consultant:me})));
+        const otherAc=(Array.isArray(d.activity)?d.activity:[]).filter(a=>a.type!=='Call').map(a=>({...a,date:normD(a.date),consultant:me}));
         saveAc([...callsFromLogs,...otherAc].sort((a,b)=>b.date.localeCompare(a.date)));
-        setRepM(false);setTab('meets');
+        setRepM(false);setTab('activity');
         toast$(`✓ Restored — ${(rc||[]).length} contacts · ${callsFromLogs.length} calls · all attributed to AK`);
       }catch(err){console.error(err);toast$('Invalid backup file','err');}
     };
@@ -1122,7 +1123,7 @@ export default function App(){
           {tab==='roles'&&<div style={{padding:24}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,flexWrap:'wrap',gap:10}}>
               <div style={{fontSize:18,fontWeight:700,fontFamily:SERIF}}>Roles</div>
-              <button style={btp()} onClick={()=>{setRoleF(newRole());setRoleM('add');}}>+ Add Role</button>
+              <button style={btp()} onClick={()=>{setRoleF({...newRole(),consultant:me});setRoleM('add');}}>+ Add Role</button>
             </div>
             <div style={{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap',alignItems:'center'}}>
               <div style={{display:'flex',gap:4,background:P.wh,borderRadius:8,border:`1px solid ${P.bo}`,padding:4}}>
@@ -1225,7 +1226,7 @@ export default function App(){
               <button style={{...bts(),padding:'6px 12px',fontSize:12,...(actW===WS?{background:`${P.ac}10`,borderColor:P.ac,color:P.ac}:{})}} onClick={()=>setActW(WS)}>This Week</button>
               <button style={{...bts(),padding:'6px 12px',fontSize:12}} onClick={()=>setActW(w=>addDays(w,7))}>Next →</button>
               <div style={{fontSize:13,color:P.ts,fontWeight:500}}>{AWD[0]} — {AWD[6]}</div>
-              <select value={actC} onChange={e=>setActC(e.target.value)} style={{...INP,width:'auto',marginLeft:'auto'}}><option value="All">All Consultants</option>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select>
+              <select value={actC} onChange={e=>setActC(e.target.value)} style={{...INP,width:'auto',marginLeft:'auto'}}><option value="All">All Consultants</option>{knownConsultants.map(c=><option key={c} value={c}>{c}</option>)}</select>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
               {[{type:'Call',label:'Calls',target:targets.calls,col:P.bl},{type:'Meeting',label:'Meetings',target:targets.meetings,col:P.pu},{type:'Float Email',label:'Floats',target:targets.floats,col:P.or},{type:'New Lead',label:'New Leads',target:targets.leads,col:P.gn},{type:'Client Signed',label:'Clients Signed',target:0,col:P.ac}].map(item=>{
@@ -1237,6 +1238,28 @@ export default function App(){
                 </div>;
               })}
             </div>
+            {knownConsultants.length>1&&<div style={{...CARD,overflow:'hidden',marginBottom:16}}>
+              <div style={{padding:'12px 16px',borderBottom:`1px solid ${P.bo}`,fontSize:13,fontWeight:600}}>Team — This Month</div>
+              <div style={{overflowX:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                  <thead><tr style={{borderBottom:`1px solid ${P.bo}`,background:PANEL}}><th style={TH_S}>Consultant</th><th style={TH_S}>Calls</th><th style={TH_S}>Meetings</th><th style={TH_S}>Floats</th><th style={TH_S}>New Leads</th><th style={TH_S}>Clients Signed</th></tr></thead>
+                  <tbody>
+                    {knownConsultants.map(name=>{
+                      const mine=activity.filter(a=>a.consultant===name&&a.date>=MS);
+                      const cnt=type=>mine.filter(a=>a.type===type).length;
+                      return <tr key={name} style={{borderBottom:`1px solid ${P.bo}`}}>
+                        <td style={{padding:'9px 14px',fontWeight:600}}>{name}</td>
+                        <td style={{padding:'9px 14px'}}>{cnt('Call')}</td>
+                        <td style={{padding:'9px 14px'}}>{cnt('Meeting')}</td>
+                        <td style={{padding:'9px 14px'}}>{cnt('Float Email')}</td>
+                        <td style={{padding:'9px 14px'}}>{cnt('New Lead')}</td>
+                        <td style={{padding:'9px 14px'}}>{cnt('Client Signed')}</td>
+                      </tr>;
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>}
             <div style={{...CARD,overflow:'hidden',marginBottom:16}}>
               <div style={{overflowX:'auto'}}>
                 <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:480}}>
@@ -1264,41 +1287,6 @@ export default function App(){
             </div>
           </div>}
 
-          {/* MEETINGS LOG */}
-          {tab==='meets'&&<div style={{padding:24}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-              <div style={{fontSize:18,fontWeight:700,fontFamily:SERIF}}>Meetings & Calls Log</div>
-              <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                <div style={{fontSize:11,color:P.tm,background:PANEL,border:`1px solid ${P.bo}`,borderRadius:6,padding:'4px 10px'}}>Today: <strong style={{color:P.tx}}>{T}</strong>{dateOverride&&<span style={{color:P.or}}> (override)</span>}</div>
-                <button style={btp()} onClick={()=>setAcM(true)}>+ Log Entry</button>
-              </div>
-            </div>
-            <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center',flexWrap:'wrap'}}>
-              <div style={{display:'flex',gap:4,background:P.wh,borderRadius:8,border:`1px solid ${P.bo}`,padding:4}}>
-                {['All','Call','Meeting'].map(type=><button key={type} onClick={()=>setMtT(type)} style={{padding:'5px 14px',borderRadius:6,border:'none',background:mtT===type?ACL[type]||P.ac:'transparent',color:mtT===type?'#fff':P.ts,cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600}}>{type}</button>)}
-              </div>
-              <div style={{display:'flex',gap:4,background:P.wh,borderRadius:8,border:`1px solid ${P.bo}`,padding:4,flexWrap:'wrap'}}>
-                {[['today','Today'],['week','This Week'],['month','This Month'],['custom','Custom Date'],['all','All Time']].map(([v,l])=><button key={v} onClick={()=>setMeetRange(v)} style={{padding:'5px 12px',borderRadius:6,border:'none',background:meetRange===v?P.ac:'transparent',color:meetRange===v?'#fff':P.ts,cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600,whiteSpace:'nowrap'}}>{l}</button>)}
-              </div>
-              {meetRange==='custom'&&(
-                <div style={{display:'flex',gap:6,alignItems:'center',background:P.wh,borderRadius:8,border:`1px solid ${P.bo}`,padding:'6px 10px',flexWrap:'wrap'}}>
-                  <span style={{fontSize:11,color:P.ts,fontWeight:500}}>From</span>
-                  <input type="date" value={meetFrom} onChange={e=>setMeetFrom(e.target.value)} style={{border:`1px solid ${P.bo}`,borderRadius:6,padding:'4px 8px',fontSize:12,outline:'none',background:INBG,color:P.tx,fontFamily:'inherit'}}/>
-                  <span style={{fontSize:11,color:P.ts,fontWeight:500}}>To</span>
-                  <input type="date" value={meetTo} onChange={e=>setMeetTo(e.target.value)} style={{border:`1px solid ${P.bo}`,borderRadius:6,padding:'4px 8px',fontSize:12,outline:'none',background:INBG,color:P.tx,fontFamily:'inherit'}}/>
-                </div>
-              )}
-              <div style={{fontSize:12,color:P.ts}}>{filtMeet.length}{meetRange!=='all'?` of ${meetLog.length} total`:' entries'}</div>
-            </div>
-            <div style={{...CARD,overflow:'hidden'}}>
-              {!filtMeet.length&&<div style={{padding:40,textAlign:'center',color:P.ts}}>{meetLog.length?`No entries for this period — try "All Time" to see everything.`:'No meetings or calls logged yet.'}</div>}
-              {filtMeet.map((a,i)=><div key={a.id} style={{display:'flex',gap:14,padding:'14px 18px',borderBottom:i<filtMeet.length-1?`1px solid ${P.bo}`:'none',alignItems:'flex-start'}}>
-                <div style={{flexShrink:0,width:100}}><div style={{fontSize:12,fontWeight:600}}>{a.date}</div><div style={{marginTop:4}}><Bge l={a.type} c={ACL[a.type]||P.ts}/></div></div>
-                <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600}}>{a.contact||'(No contact)'} <span style={{color:P.ts,fontWeight:400,fontSize:12}}>{a.company?`· ${a.company}`:''}</span></div>{a.outcome&&<div style={{fontSize:12,color:P.ts,marginTop:3}}>Outcome: {a.outcome}</div>}{a.nextSteps&&<div style={{fontSize:12,color:P.ac,marginTop:2}}>→ Next: {a.nextSteps}</div>}</div>
-                <div style={{flexShrink:0,textAlign:'right'}}><div style={{fontSize:11,color:P.tm}}>{a.consultant}</div><button style={{...btsm(P.rd),marginTop:4}} onClick={()=>saveAc(activity.filter(x=>x.id!==a.id))}>Delete</button></div>
-              </div>)}
-            </div>
-          </div>}
 
           {/* CLIENTS */}
           {tab==='clients'&&<div style={{padding:24}}>
@@ -1322,17 +1310,17 @@ export default function App(){
                     <div><div style={{fontSize:18,fontWeight:700}}>{cl.company}</div><div style={{fontSize:12,color:P.ts,marginTop:2}}>{cl.contactName}{cl.contactTitle?` · ${cl.contactTitle}`:''}</div></div>
                     <div style={{display:'flex',gap:4,flexShrink:0}}><button style={btsm()} onClick={()=>{setClF({...cl,invoices:(cl.invoices||[]).map(i=>({...i}))});setClM('edit');}}>Edit</button><button style={btsm(P.rd)} onClick={()=>delOk(cl.company,()=>{saveCl(clients.filter(c=>c.id!==cl.id));setConf(null);toast$('Deleted');})}>Del</button></div>
                   </div>
-                  <div style={{display:'flex',marginBottom:cl.contractLink?10:14,borderRadius:8,border:`1px solid ${P.bo}`,overflow:'hidden'}}>
+                  <div style={{display:'flex',marginBottom:cl.contractFile?10:14,borderRadius:8,border:`1px solid ${P.bo}`,overflow:'hidden'}}>
                     {[{l:'1st Role',v:`${cl.feeFirst||'—'}%`,c:P.gn},{l:'Subsequent',v:`${cl.feeSubsequent||'—'}%`,c:P.ac},{l:'Terms',v:cl.paymentTerms||'—',c:P.ts},{l:'Fees',v:fees?`AED ${(fees/1000).toFixed(0)}k`:'—',c:P.ac}].map((item,idx)=><div key={item.l} style={{flex:1,padding:'10px 6px',textAlign:'center',background:PANEL,borderRight:idx<3?`1px solid ${P.bo}`:'none'}}><div style={{fontWeight:700,fontSize:14,color:item.c}}>{item.v}</div><div style={{fontSize:10,color:P.tm,marginTop:2}}>{item.l}</div></div>)}
                   </div>
-                  {cl.contractLink&&<div style={{marginBottom:12,padding:'7px 10px',background:PANEL,borderRadius:7,border:`1px solid ${P.bo}`,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:11,color:P.ts}}>📄</span><a href={cl.contractLink} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:P.bl}}>View Contract</a></div>}
+                  {cl.contractFile&&<div style={{marginBottom:12,padding:'7px 10px',background:PANEL,borderRadius:7,border:`1px solid ${P.bo}`,display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:11,color:P.ts}}>📄</span><button onClick={()=>openCvFile(cl.contractFile.path)} style={{fontSize:11,color:P.bl,background:'none',border:'none',cursor:'pointer',fontFamily:'inherit',padding:0}}>{cl.contractFile.name}</button></div>}
                   {invOD.length>0&&<div style={{marginBottom:10,padding:'7px 10px',background:`${P.rd}08`,borderRadius:7,border:`1px solid ${P.rd}30`,fontSize:11,color:P.rd,fontWeight:600}}>⚠ {invOD.length} invoice{invOD.length>1?'s':''} overdue or written off</div>}
                   {clRoles.length>0
                     ?<button onClick={()=>{setRoleClientFilter(cl.id);setTab('roles');}} style={{width:'100%',textAlign:'left',padding:'9px 12px',background:PANEL,borderRadius:8,border:`1px solid ${P.bo}`,marginBottom:12,cursor:'pointer',fontFamily:'inherit'}}>
                       <span style={{fontSize:12,fontWeight:600,color:P.ac}}>{clRoles.length} role{clRoles.length!==1?'s':''} →</span>
                       <span style={{fontSize:11,color:P.ts,marginLeft:8}}>{liveRoles.length} live · {wonRoles.length} won · {lostRoles.length} lost</span>
                     </button>
-                    :<button onClick={()=>{setRoleF({...newRole(),clientId:cl.id});setRoleM('add');}} style={{width:'100%',padding:'9px 12px',background:'transparent',borderRadius:8,border:`1px dashed ${P.bo}`,marginBottom:12,cursor:'pointer',fontFamily:'inherit',color:P.ts,fontSize:12}}>+ Add a role for this client (opens Roles tab)</button>
+                    :<button onClick={()=>{setRoleF({...newRole(),clientId:cl.id,consultant:me});setRoleM('add');}} style={{width:'100%',padding:'9px 12px',background:'transparent',borderRadius:8,border:`1px dashed ${P.bo}`,marginBottom:12,cursor:'pointer',fontFamily:'inherit',color:P.ts,fontSize:12}}>+ Add a role for this client (opens Roles tab)</button>
                   }
                   {(cl.invoices||[]).length>0&&<div style={{marginTop:10}}>
                     <div style={{fontSize:11,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:6,display:'flex',justifyContent:'space-between'}}><span>Invoices ({(cl.invoices||[]).length})</span>{invT>0&&<span style={{color:P.ac}}>AED {(invP/1000).toFixed(0)}k / {(invT/1000).toFixed(0)}k cleared</span>}</div>
@@ -1358,7 +1346,7 @@ export default function App(){
       {lgM&&<Mod title={`Log Call · ${lgM.name}`} onX={()=>setLgM(null)}>
         <div style={G2}>
           <div><div style={LB_S}>Date</div><input value={lgF.date} onChange={e=>setLgF(f=>({...f,date:e.target.value}))} type="date" style={INP}/></div>
-          <div><div style={LB_S}>Logged By</div><div style={{display:'flex',gap:6}}>{CONS.map(c=><button key={c} onClick={()=>setLgF(f=>({...f,consultant:c}))} style={{flex:1,padding:'9px',borderRadius:8,border:`2px solid ${lgF.consultant===c?P.ac:P.bo}`,background:lgF.consultant===c?`${P.ac}12`:'transparent',color:lgF.consultant===c?P.ac:P.ts,cursor:'pointer',fontWeight:700,fontSize:13,fontFamily:'inherit'}}>{c}</button>)}</div></div>
+          <div><div style={LB_S}>Logged By</div><div style={{padding:'9px 0',fontSize:13,fontWeight:600,color:P.ac}}>{me||'—'}</div></div>
           <div><div style={LB_S}>Move Stage To</div><select value={lgF.stage} onChange={e=>setLgF(f=>({...f,stage:e.target.value}))} style={INP}>{STGS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
           <div><div style={LB_S}>Next Steps</div><input value={lgF.nextSteps} onChange={e=>setLgF(f=>({...f,nextSteps:e.target.value}))} placeholder="e.g. Send company profile" style={INP}/></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Next Follow-up <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(leave blank to clear)</span></div><input value={lgF.nextFollowUp} onChange={e=>setLgF(f=>({...f,nextFollowUp:e.target.value}))} type="date" style={INP}/></div>
@@ -1396,7 +1384,7 @@ export default function App(){
           <div><div style={LB_S}>Current Salary (monthly)</div><input value={caF.currentSalary||''} onChange={e=>setCaF(f=>({...f,currentSalary:e.target.value}))} type="number" min="0" style={INP}/></div>
           <div><div style={LB_S}>Salary Exp. (monthly)</div><input value={caF.salaryExpectation||''} onChange={e=>setCaF(f=>({...f,salaryExpectation:e.target.value}))} type="number" min="0" style={INP}/></div>
           <div><div style={LB_S}>Status</div><select value={caF.status||'Active'} onChange={e=>setCaF(f=>({...f,status:e.target.value}))} style={INP}>{CSS2.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
-          <div><div style={LB_S}>Consultant</div><select value={caF.consultant||'AK'} onChange={e=>setCaF(f=>({...f,consultant:e.target.value}))} style={INP}>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><div style={LB_S}>Consultant</div><div style={{padding:'9px 0',fontSize:13,fontWeight:600,color:P.ac}}>{caF.consultant||me||'—'}</div></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Notes</div><textarea value={caF.notes||''} onChange={e=>setCaF(f=>({...f,notes:e.target.value}))} rows={3} style={INP_TA}/></div>
         </div>
 
@@ -1409,15 +1397,17 @@ export default function App(){
                 <div style={{display:'flex',gap:6}}><button onClick={()=>openCvFile(caF.originalCv.path)} style={{...btsm(P.bl),padding:'2px 8px'}}>Open</button><button onClick={()=>removeCvFile('original',null,caF.originalCv.path)} style={{...btsm(P.rd),padding:'2px 8px'}}>✕</button></div>
               </div>
               :<div>
-                <div style={LB_S}>Upload Original CV <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(.docx — stores the file here AND extracts text into CV Body below)</span></div>
-                <input type="file" accept=".docx" onChange={async e=>{
+                <div style={LB_S}>Upload Original CV <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(PDF or Word — stores the file here AND drops extracted text into Experience below as a starting point; redistribute it across the right sections before generating)</span></div>
+                <input type="file" accept=".pdf,.docx,.doc" onChange={async e=>{
                   const file=e.target.files[0];if(!file)return;
                   await uploadOriginalCv(file);
                   try{
                     const buf=await file.arrayBuffer();
-                    const result=await mammoth.extractRawText({arrayBuffer:buf});
-                    setCaF(f=>({...f,cvBody:result.value}));
-                  }catch(err){console.error(err);toast$('⚠ Stored the file, but could not extract its text — paste the CV body manually','err');}
+                    const isPdf=file.name.toLowerCase().endsWith('.pdf')||file.type==='application/pdf';
+                    const text=isPdf?await extractPdfText(buf):(await mammoth.extractRawText({arrayBuffer:buf})).value;
+                    setCaF(f=>({...f,cvSections:{...f.cvSections,experience:text}}));
+                    toast$('✓ Text extracted into Experience — move content into the right sections below');
+                  }catch(err){console.error(err);toast$('⚠ Stored the file, but could not extract its text — paste the CV content manually','err');}
                   e.target.value='';
                 }} style={{...INP,padding:'6px 8px'}}/>
               </div>
@@ -1434,16 +1424,35 @@ export default function App(){
             <div><div style={LB_S}>Position Applied</div><input value={caF.positionApplied||''} onChange={e=>setCaF(f=>({...f,positionApplied:e.target.value}))} placeholder="Defaults to Current Role if blank" style={INP}/></div>
           </div>
           <div style={{marginTop:10}}>
-            <div style={LB_S}>Candidate Summary <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(one bullet per line — shown on the cover page)</span></div>
-            <textarea value={caF.cvSummary||''} onChange={e=>setCaF(f=>({...f,cvSummary:e.target.value}))} rows={4} placeholder={"20+ years of experience in...\nFormer Chief of Staff to COO at..."} style={INP_TA}/>
+            <div style={LB_S}>Candidate Summary <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(one bullet per line — shown on the cover page, separate from the body's Summary section below)</span></div>
+            <textarea value={caF.cvSummary||''} onChange={e=>setCaF(f=>({...f,cvSummary:e.target.value}))} rows={3} placeholder={"20+ years of experience in...\nFormer Chief of Staff to COO at..."} style={INP_TA}/>
           </div>
-          <div style={{marginTop:10}}>
-            <div style={LB_S}>CV Body <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(paste the CV content — type SUMMARY:, EXPERIENCE:, EDUCATION:, CERTIFICATIONS:, SKILLS: on their own line for section headers, and start lines with • for bullets. For the Confidential version, redact company/university names here yourself before downloading.)</span></div>
-            <textarea value={caF.cvBody||''} onChange={e=>setCaF(f=>({...f,cvBody:e.target.value}))} rows={10} style={{...INP_TA,fontFamily:'monospace',fontSize:11.5}}/>
-          </div>
-          <div style={{display:'flex',gap:8,marginTop:10}}>
-            <button onClick={()=>generateAndStoreCv(true)} style={{...btp(P.tx),color:P.bg}}>Generate Confidential PDF</button>
-            <button onClick={()=>generateAndStoreCv(false)} style={btp()}>Generate Formatted PDF</button>
+
+          <div style={{fontSize:11,color:P.tm,marginTop:14,marginBottom:6}}>Each section below becomes its own header in the document automatically — nothing to type manually. Untick a section to leave it out entirely, even if it has content.</div>
+          {CV_SECTION_ORDER.map(([key,label])=>{
+            const included=caF.cvInclude?caF.cvInclude[key]!==false:true;
+            return <div key={key} style={{marginTop:10}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                  <input type="checkbox" checked={included} onChange={e=>setCaF(f=>({...f,cvInclude:{...(f.cvInclude||{}),[key]:e.target.checked}}))}/>
+                  <span style={{fontSize:11,color:P.ts,textTransform:'uppercase',letterSpacing:'0.6px',fontWeight:600}}>{label}</span>
+                </label>
+                {key==='experience'&&<span style={{fontSize:10,color:P.tm}}>For Confidential, redact company/university names here before generating</span>}
+              </div>
+              <textarea
+                value={(caF.cvSections||{})[key]||''}
+                onChange={e=>setCaF(f=>({...f,cvSections:{...(f.cvSections||{}),[key]:e.target.value}}))}
+                rows={key==='experience'?9:4}
+                disabled={!included}
+                placeholder={key==='summary'?'A short paragraph, not bulleted.':'Start lines with • for bullets.'}
+                style={{...INP_TA,fontFamily:'monospace',fontSize:11.5,opacity:included?1:0.5}}
+              />
+            </div>;
+          })}
+
+          <div style={{display:'flex',gap:8,marginTop:14}}>
+            <button onClick={()=>generateAndStoreCv(true)} style={{...btp(P.tx),color:P.bg}}>Generate Confidential (Word)</button>
+            <button onClick={()=>generateAndStoreCv(false)} style={btp()}>Generate Formatted (Word)</button>
           </div>
         </div>
 
@@ -1455,7 +1464,7 @@ export default function App(){
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Client *</div><select value={roleF.clientId||''} onChange={e=>setRoleF(f=>({...f,clientId:e.target.value}))} style={INP}><option value="">Select a client...</option>{clients.map(c=><option key={c.id} value={c.id}>{c.company}</option>)}</select></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Role Title *</div><input value={roleF.title||''} onChange={e=>setRoleF(f=>({...f,title:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Status</div><select value={roleF.status||'Briefed'} onChange={e=>setRoleF(f=>({...f,status:e.target.value}))} style={INP}>{RS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
-          <div><div style={LB_S}>Managed By</div><select value={roleF.consultant||'AK'} onChange={e=>setRoleF(f=>({...f,consultant:e.target.value}))} style={INP}>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><div style={LB_S}>Managed By <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(defaults to you, editable if reassigned)</span></div><input value={roleF.consultant||''} onChange={e=>setRoleF(f=>({...f,consultant:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Contact at Client</div><input value={roleF.contactPerson||''} onChange={e=>setRoleF(f=>({...f,contactPerson:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Date Opened</div><input type="date" value={roleF.dateOpened||''} onChange={e=>setRoleF(f=>({...f,dateOpened:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Currency</div><select value={roleF.currency||'AED'} onChange={e=>setRoleF(f=>({...f,currency:e.target.value}))} style={INP}>{CURR.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
@@ -1507,7 +1516,7 @@ export default function App(){
           </div>
           <div><div style={LB_S}>Date Sent</div><input value={flF.dateSent||T} onChange={e=>setFlF(f=>({...f,dateSent:e.target.value}))} type="date" style={INP}/></div>
           <div><div style={LB_S}>Response Status</div><select value={flF.responseStatus||'No Response'} onChange={e=>setFlF(f=>({...f,responseStatus:e.target.value}))} style={INP}>{FSS.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
-          <div><div style={LB_S}>Consultant</div><select value={flF.consultant||'AK'} onChange={e=>setFlF(f=>({...f,consultant:e.target.value}))} style={INP}>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><div style={LB_S}>Consultant</div><div style={{padding:'9px 0',fontSize:13,fontWeight:600,color:P.ac}}>{flF.consultant||me||'—'}</div></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Notes</div><textarea value={flF.notes||''} onChange={e=>setFlF(f=>({...f,notes:e.target.value}))} rows={3} style={INP_TA}/></div>
         </div>
         <div style={{display:'flex',gap:8,marginTop:20,justifyContent:'flex-end'}}><button style={bts()} onClick={()=>setFlM(null)}>Cancel</button><button style={btp()} onClick={saveFlF}>Save Float</button></div>
@@ -1521,7 +1530,7 @@ export default function App(){
           <div><div style={LB_S}>Company</div><input value={acF.company||''} onChange={e=>setAcF(f=>({...f,company:e.target.value}))} style={INP}/></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Outcome / Summary</div><input value={acF.outcome||''} onChange={e=>setAcF(f=>({...f,outcome:e.target.value}))} style={INP}/></div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Next Steps</div><input value={acF.nextSteps||''} onChange={e=>setAcF(f=>({...f,nextSteps:e.target.value}))} style={INP}/></div>
-          <div><div style={LB_S}>Consultant</div><select value={acF.consultant||'AK'} onChange={e=>setAcF(f=>({...f,consultant:e.target.value}))} style={INP}>{CONS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+          <div><div style={LB_S}>Consultant</div><div style={{padding:'9px 0',fontSize:13,fontWeight:600,color:P.ac}}>{me||'—'}</div></div>
         </div>
         <div style={{display:'flex',gap:8,marginTop:20,justifyContent:'flex-end'}}><button style={bts()} onClick={()=>setAcM(false)}>Cancel</button><button style={btp()} onClick={saveAcF}>Save Entry</button></div>
       </Mod>}
@@ -1537,7 +1546,24 @@ export default function App(){
           <div><div style={LB_S}>Fee % — Subsequent</div><input value={clF.feeSubsequent||''} onChange={e=>setClF(f=>({...f,feeSubsequent:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Payment Terms</div><input value={clF.paymentTerms||''} onChange={e=>setClF(f=>({...f,paymentTerms:e.target.value}))} style={INP}/></div>
           <div><div style={LB_S}>Contract Date</div><input value={clF.contractDate||''} onChange={e=>setClF(f=>({...f,contractDate:e.target.value}))} type="date" style={INP}/></div>
-          <div style={{gridColumn:'span 2'}}><div style={LB_S}>Contract Link</div><input value={clF.contractLink||''} onChange={e=>setClF(f=>({...f,contractLink:e.target.value}))} placeholder="https://..." style={INP}/></div>
+          <div style={{gridColumn:'span 2'}}>
+            <div style={LB_S}>Signed Contract <span style={{textTransform:'none',letterSpacing:0,color:P.tm,fontWeight:400}}>(PDF or Word — stored directly, no external link needed)</span></div>
+            {clF.contractFile
+              ?<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:PANEL,borderRadius:8,border:`1px solid ${P.bo}`}}>
+                <span style={{fontSize:12}}>📄 {clF.contractFile.name}</span>
+                <div style={{display:'flex',gap:6}}><button onClick={()=>openCvFile(clF.contractFile.path)} style={{...btsm(P.bl),padding:'2px 8px'}}>Open</button><button onClick={async()=>{try{await fileStorage.remove(clF.contractFile.path);}catch(err){console.error(err);}setClF(f=>({...f,contractFile:null}));}} style={{...btsm(P.rd),padding:'2px 8px'}}>✕</button></div>
+              </div>
+              :<input type="file" accept=".pdf,.docx,.doc" onChange={async e=>{
+                const file=e.target.files[0];if(!file)return;
+                try{
+                  const path=await fileStorage.upload(`clients/${clF.id}`,file);
+                  setClF(f=>({...f,contractFile:{name:file.name,path,uploadedAt:new Date().toISOString()}}));
+                  toast$('✓ Contract uploaded');
+                }catch(err){console.error(err);toast$('⚠ Upload failed — check your connection','err');}
+                e.target.value='';
+              }} style={{...INP,padding:'6px 8px'}}/>
+            }
+          </div>
           <div style={{gridColumn:'span 2'}}><div style={LB_S}>Notes</div><textarea value={clF.notes||''} onChange={e=>setClF(f=>({...f,notes:e.target.value}))} rows={2} style={INP_TA}/></div>
         </div>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,marginTop:16}}><div style={{fontSize:12,fontWeight:600,color:P.ts,textTransform:'uppercase',letterSpacing:'0.5px'}}>Invoices ({(clF.invoices||[]).length})</div><button style={{...bts(),padding:'4px 12px',fontSize:11}} onClick={addInv}>+ Add Invoice</button></div>
@@ -1594,7 +1620,7 @@ export default function App(){
           <div style={{fontSize:11,color:P.tm,marginTop:-4}}>Every restored record — even ones logged under a different name — is automatically reassigned to AK.</div>
           <div style={{borderTop:`1px solid ${P.bo}`,paddingTop:12,marginTop:4}}>
             <div style={{fontSize:12,fontWeight:600,color:P.ts,marginBottom:8}}>👤 Consultant Cleanup</div>
-            <button onClick={reassignAllToAK} style={{width:'100%',padding:'9px',borderRadius:8,border:`1px solid ${P.ac}30`,background:`${P.ac}08`,color:P.ac,cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600}}>Reassign all existing data to AK</button>
+            <button onClick={reassignAllToMe} style={{width:'100%',padding:'9px',borderRadius:8,border:`1px solid ${P.ac}30`,background:`${P.ac}08`,color:P.ac,cursor:'pointer',fontSize:12,fontFamily:'inherit',fontWeight:600}}>Reassign all existing data to me ({me})</button>
           </div>
           <div style={{borderTop:`1px solid ${P.bo}`,paddingTop:12,marginTop:4}}>
             <div style={{fontSize:12,fontWeight:600,color:P.ts,marginBottom:8}}>🔁 Deduplication Tools</div>

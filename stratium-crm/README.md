@@ -60,6 +60,11 @@ You need two accounts: **Supabase** (your private database + login) and
 3. Before clicking Deploy, expand **Environment Variables** and add:
    - `VITE_SUPABASE_URL` = the Project URL from Supabase step 1.5
    - `VITE_SUPABASE_ANON_KEY` = the anon/public key from Supabase step 1.5
+   - `VITE_WORKSPACE_ID` = your own Supabase Auth User UID (Authentication ->
+     Users -> your account -> copy the User UID). This is the shared
+     workspace every login reads/writes under -- set once, never changes.
+     If you're running `sql/shared_workspace.sql` for multi-user access,
+     every teammate's login still points at this same ID.
 4. Click **Deploy**. In under a minute you'll get a live URL like
    `stratium-crm.vercel.app`. Open it, sign in with the email/password you
    created in Supabase step 1.4 -- you're live.
